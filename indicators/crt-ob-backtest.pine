@@ -1,0 +1,348 @@
+//@version=5
+indicator("CRT OB Backtest M15", overlay=true, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════
+c3_window      = input.int(3, "C3 confirm window (H4 bars)", minval=1, maxval=10)
+setup_max_bars = input.int(6, "Setup persistence (H4 bars)",   minval=1, maxval=30)
+use_daily_bias = input.bool(false, "Require Daily Bias")
+pip_size       = syminfo.mintick * 10
+
+// ═══════════════════════════════════════════════════
+// DAILY BIAS
+// ═══════════════════════════════════════════════════
+d_prev_high = request.security(syminfo.tickerid, "D", high,  lookahead=barmerge.lookahead_off)
+d_prev_low  = request.security(syminfo.tickerid, "D", low,   lookahead=barmerge.lookahead_off)
+
+var float d_today_high = na
+var float d_today_low  = na
+bool new_day = ta.change(time("D")) != 0
+if new_day
+    d_today_high := high
+    d_today_low  := low
+else
+    d_today_high := math.max(nz(d_today_high), high)
+    d_today_low  := math.min(nz(d_today_low),  low)
+
+bool daily_bull = d_today_low  <= d_prev_low  and close > d_prev_low
+bool daily_bear = d_today_high >= d_prev_high and close < d_prev_high
+
+// ═══════════════════════════════════════════════════
+// H4 STATE MACHINE
+// ═══════════════════════════════════════════════════
+h4_time  = request.security(syminfo.tickerid, "240", time,  lookahead=barmerge.lookahead_off)
+h4_high  = request.security(syminfo.tickerid, "240", high,  lookahead=barmerge.lookahead_off)
+h4_low   = request.security(syminfo.tickerid, "240", low,   lookahead=barmerge.lookahead_off)
+h4_close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+
+bool new_h4 = ta.change(h4_time) != 0
+
+var int   h4_state     = 0
+var float c1_high      = na
+var float c1_low       = na
+var int   c1_bar       = na
+var float c2_high      = na
+var float c2_low       = na
+var int   h4_direction = 0
+var float c2_wick_ext  = na
+var float dol_level    = na
+var int   setup_bar    = na
+var int   c2_age       = 0
+var int   setup_age    = 0
+
+if new_h4
+    float jc_high  = h4_high
+    float jc_low   = h4_low
+    float jc_close = h4_close
+
+    if h4_state == 0
+        c1_high  := jc_high
+        c1_low   := jc_low
+        c1_bar   := bar_index
+        h4_state := 1
+
+    else if h4_state == 1
+        bool bull_c2 = jc_low  < c1_low  and jc_close > c1_low  and (not use_daily_bias or daily_bull)
+        bool bear_c2 = jc_high > c1_high and jc_close < c1_high and (not use_daily_bias or daily_bear)
+
+        if bull_c2
+            h4_direction := 1
+            c2_high      := jc_high
+            c2_low       := jc_low
+            c2_wick_ext  := jc_low
+            dol_level    := c1_high
+            c2_age       := 0
+            h4_state     := 2
+        else if bear_c2
+            h4_direction := -1
+            c2_high      := jc_high
+            c2_low       := jc_low
+            c2_wick_ext  := jc_high
+            dol_level    := c1_low
+            c2_age       := 0
+            h4_state     := 2
+        else
+            c1_high  := jc_high
+            c1_low   := jc_low
+            c1_bar   := bar_index
+            h4_direction := 0
+
+    else if h4_state == 2
+        c2_age := c2_age + 1
+        bool bull_c3 = h4_direction ==  1 and jc_close > c2_high
+        bool bear_c3 = h4_direction == -1 and jc_close < c2_low
+        bool c2_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
+
+        if bull_c3 or bear_c3
+            h4_state  := 3
+            setup_bar := bar_index
+            setup_age := 0
+        else if c2_invalid or c2_age >= c3_window
+            c1_high  := jc_high
+            c1_low   := jc_low
+            c1_bar   := bar_index
+            h4_direction := 0
+            c2_wick_ext := na
+            dol_level   := na
+            c2_age      := 0
+            h4_state    := 1
+
+    else if h4_state == 3
+        setup_age := setup_age + 1
+        bool setup_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
+        if setup_invalid or setup_age >= setup_max_bars
+            c1_high  := jc_high
+            c1_low   := jc_low
+            c1_bar   := bar_index
+            h4_direction := 0
+            c2_wick_ext := na
+            dol_level   := na
+            setup_bar   := na
+            setup_age   := 0
+            h4_state    := 1
+
+bool h4_setup_active = h4_state == 3
+
+// ═══════════════════════════════════════════════════
+// H1 TURTLE SOUP
+// ═══════════════════════════════════════════════════
+h1_time  = request.security(syminfo.tickerid, "60", time,  lookahead=barmerge.lookahead_off)
+h1_high  = request.security(syminfo.tickerid, "60", high,  lookahead=barmerge.lookahead_off)
+h1_low   = request.security(syminfo.tickerid, "60", low,   lookahead=barmerge.lookahead_off)
+h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+
+bool new_h1 = ta.change(h1_time) != 0
+
+var float h1_prev_high  = na
+var float h1_prev_low   = na
+var bool  h1_confirmed  = false
+var int   h1_ts_bar     = na
+
+if new_h1
+    float jc_h = h1_high
+    float jc_l = h1_low
+    float jc_c = h1_close
+
+    if not h4_setup_active
+        h1_confirmed := false
+
+    if h4_setup_active and not na(h1_prev_high) and not na(h1_prev_low)
+        bool h1_bull_ts = h4_direction == 1 and jc_l < h1_prev_low and jc_c > h1_prev_low and jc_c < h1_prev_high
+        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low
+
+        if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
+            h1_confirmed := true
+            h1_ts_bar    := bar_index
+
+    h1_prev_high := h1_high
+    h1_prev_low  := h1_low
+
+bool full_setup = h4_setup_active and h1_confirmed
+
+// ═══════════════════════════════════════════════════
+// M15 ORDER BLOCK (same engulfing logic as crt-unified)
+// ═══════════════════════════════════════════════════
+bool is_bull    = close > open
+bool is_bear    = close < open
+bool prev_is_bull = close[1] > open[1]
+bool prev_is_bear = close[1] < open[1]
+
+bool bull_engulf = is_bull and prev_is_bear and open <= close[1] and close >= open[1]
+bool bear_engulf = is_bear and prev_is_bull and open >= close[1] and close <= open[1]
+
+bool ob_trigger_long  = full_setup and h4_direction == 1 and bull_engulf
+bool ob_trigger_short = full_setup and h4_direction == -1 and bear_engulf
+
+// ═══════════════════════════════════════════════════
+// BACKTEST ENGINE
+// ═══════════════════════════════════════════════════
+// Entry: next bar open after OB engulfing
+// SL: C2 wick ± 3 pips
+// TP1: 50% C1 range, TP2: DOL
+// Exit: 10 bars max
+
+var float entry_price = na
+var float sl_price    = na
+var float tp1_price   = na
+var float tp2_price   = na
+var int   entry_bar   = na
+var int   dir         = 0
+
+bool in_position = not na(entry_price)
+
+// Set entry on bar AFTER engulfing (next bar open)
+if ob_trigger_long and not in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+    entry_price := open
+    sl_price    := c2_wick_ext - 3 * pip_size
+    tp1_price   := c1_low + (c1_high - c1_low) * 0.5
+    tp2_price   := dol_level
+    entry_bar   := bar_index + 1
+    dir         := 1
+
+if ob_trigger_short and not in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+    entry_price := open
+    sl_price    := c2_wick_ext + 3 * pip_size
+    tp1_price   := c1_high - (c1_high - c1_low) * 0.5
+    tp2_price   := dol_level
+    entry_bar   := bar_index + 1
+    dir         := -1
+
+// Evaluate exits from entry_bar onwards
+var int   exit_reason = 0
+var float result_pips = na
+
+bool bars_since_entry = in_position and (bar_index >= entry_bar)
+
+if bars_since_entry and exit_reason == 0
+    int bars_elapsed = bar_index - entry_bar
+
+    if dir == 1
+        if low <= sl_price
+            exit_reason := 3
+            result_pips := -(sl_price - entry_price) / pip_size
+        else if high >= tp2_price
+            exit_reason := 1
+            result_pips := (tp2_price - entry_price) / pip_size
+        else if high >= tp1_price
+            exit_reason := 2
+            result_pips := (tp1_price - entry_price) / pip_size
+        else if bars_elapsed >= 10
+            exit_reason := 4
+            result_pips := (close - entry_price) / pip_size
+
+    if dir == -1
+        if high >= sl_price
+            exit_reason := 3
+            result_pips := (sl_price - entry_price) / pip_size
+        else if low <= tp2_price
+            exit_reason := 1
+            result_pips := (entry_price - tp2_price) / pip_size
+        else if low <= tp1_price
+            exit_reason := 2
+            result_pips := (entry_price - tp1_price) / pip_size
+        else if bars_elapsed >= 10
+            exit_reason := 4
+            result_pips := (entry_price - close) / pip_size
+
+// Close position after exit recorded
+if exit_reason != 0
+    entry_price := na
+    sl_price    := na
+    tp1_price   := na
+    tp2_price   := na
+    entry_bar   := na
+    dir         := 0
+
+// ═══════════════════════════════════════════════════
+// STATS ACCUMULATION
+// ═══════════════════════════════════════════════════
+var int   total_trades = 0
+var int   wins         = 0
+var float total_pips   = 0.0
+var float max_pips     = na
+var float min_pips     = na
+
+if exit_reason != 0
+    total_trades += 1
+    if result_pips > 0
+        wins += 1
+    total_pips += result_pips
+    max_pips := na(max_pips) ? result_pips : math.max(max_pips, result_pips)
+    min_pips := na(min_pips) ? result_pips : math.min(min_pips, result_pips)
+
+float win_rate = total_trades > 0 ? wins / total_trades * 100 : 0.0
+float avg_pips = total_trades > 0 ? total_pips / total_trades : 0.0
+
+// ═══════════════════════════════════════════════════
+// VISUAL MARKERS
+// ═══════════════════════════════════════════════════
+plotshape(ob_trigger_long,  title="OB LONG",  style=shape.triangleup,   location=location.belowbar, color=color.green,  size=size.tiny)
+plotshape(ob_trigger_short, title="OB SHORT", style=shape.triangledown, location=location.abovebar, color=color.red,    size=size.tiny)
+
+plotchar(in_position and dir == 1,  title="In LONG",  char="▲", color=color.green,  location=location.abovebar)
+plotchar(in_position and dir == -1, title="In SHORT", char="▼", color=color.red,    location=location.belowbar)
+
+plotchar(exit_reason == 1, title="EXIT TP2", char="●", color=color.blue,   location=location.abovebar, size=size.small)
+plotchar(exit_reason == 2, title="EXIT TP1", char="●", color=color.orange, location=location.abovebar, size=size.small)
+plotchar(exit_reason == 3, title="EXIT SL",  char="●", color=color.red,    location=location.abovebar, size=size.small)
+plotchar(exit_reason == 4, title="EXIT TMO", char="●", color=color.gray,   location=location.abovebar, size=size.small)
+
+// ═══════════════════════════════════════════════════
+// STATS TABLE
+// ═══════════════════════════════════════════════════
+var table stats_tbl = table.new(position.bottom_right, 3, 10,
+     bgcolor=color.new(color.black, 20),
+     border_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast
+    // Row 0: headers
+    table.cell(stats_tbl, 0, 0, "TRADES",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 0, "WINS",    text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 0, "WIN%",    text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    // Row 1: trade stats
+    table.cell(stats_tbl, 0, 1, str.tostring(total_trades),          text_color=color.white,  text_size=size.normal)
+    table.cell(stats_tbl, 1, 1, str.tostring(wins),                  text_color=color.green,  text_size=size.normal)
+    table.cell(stats_tbl, 2, 1, str.tostring(win_rate, "#.#") + "%", text_color=color.yellow, text_size=size.normal)
+
+    // Row 2: blank separator
+    table.cell(stats_tbl, 0, 2, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 1, 2, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 2, 2, "", bgcolor=color.new(color.black, 60))
+
+    // Row 3: pips headers
+    table.cell(stats_tbl, 0, 3, "AVG PIPS",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 3, "MAX PIPS",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 3, "MIN PIPS",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    // Row 4: pips values
+    table.cell(stats_tbl, 0, 4, str.tostring(avg_pips, "#.#"),              text_color=color.white,  text_size=size.normal)
+    table.cell(stats_tbl, 1, 4, na(max_pips) ? "—" : str.tostring(max_pips, "#.#"), text_color=color.green, text_size=size.normal)
+    table.cell(stats_tbl, 2, 4, na(min_pips) ? "—" : str.tostring(min_pips, "#.#"), text_color=color.red,   text_size=size.normal)
+
+    // Row 5: separator
+    table.cell(stats_tbl, 0, 5, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 1, 5, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 2, 5, "", bgcolor=color.new(color.black, 60))
+
+    // Row 6: status headers
+    table.cell(stats_tbl, 0, 6, "H4 STATE",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 6, "H1 CONF",   text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 6, "OB TRIG",   text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    // Row 7: status values
+    string h4_str = h4_state == 0 ? "IDLE" : h4_state == 1 ? "C1" : h4_state == 2 ? "C2" : "SETUP"
+    table.cell(stats_tbl, 0, 7, h4_str,                              text_color=color.white,  text_size=size.small)
+    table.cell(stats_tbl, 1, 7, h1_confirmed ? "✓" : "✗",           text_color=h1_confirmed ? color.green : color.gray, text_size=size.small)
+    table.cell(stats_tbl, 2, 7, (ob_trigger_long or ob_trigger_short) ? "⚡" : "—", text_color=color.yellow, text_size=size.small)
+
+    // Row 8: separator
+    table.cell(stats_tbl, 0, 8, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 1, 8, "", bgcolor=color.new(color.black, 60))
+    table.cell(stats_tbl, 2, 8, "", bgcolor=color.new(color.black, 60))
+
+    // Row 9: total pips
+    table.cell(stats_tbl, 0, 9, "TOTAL PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 9, str.tostring(total_pips, "+#.##;-#.##"), text_color=total_pips >= 0 ? color.green : color.red, text_size=size.large)
+    table.cell(stats_tbl, 2, 9, "", bgcolor=color.new(color.black, 20))
