@@ -1,9 +1,7 @@
 //@version=5
 indicator("CRT Unified", overlay=true, max_bars_back=500)
 
-// ═══════════════════════════════════════════════════
 // INPUTS
-// ═══════════════════════════════════════════════════
 bull_color     = input.color(color.rgb(0, 193, 118),    "Bullish Color",       group="Colors")
 bear_color     = input.color(color.rgb(255, 59, 59),    "Bearish Color",       group="Colors")
 c1_color       = input.color(color.new(color.gray, 75), "C1 Box Color",        group="Colors")
@@ -15,60 +13,64 @@ show_ob_box    = input.bool(true,  "Show Order Block Box",    group="Display")
 show_levels    = input.bool(true,  "Show Entry/SL/TP Lines",  group="Display")
 show_rr        = input.bool(true,  "Show RR Label",           group="Display")
 show_panel     = input.bool(true,  "Show Info Panel",         group="Display")
+show_backtest  = input.bool(true,  "Show Backtest Engine",    group="Display")
 use_daily_bias = input.bool(false, "Require Daily Bias",      group="Filters")
 c3_window      = input.int(3, "C3 confirm window (H4 bars)",  minval=1, maxval=10, group="Filters")
 setup_max_bars = input.int(6, "Setup persistence (H4 bars)",  minval=1, maxval=30, group="Filters")
 
-// ═══════════════════════════════════════════════════
 // TIMEFRAME DETECTION
-// ═══════════════════════════════════════════════════
 is_h4  = timeframe.period == "240"
 is_h1  = timeframe.period == "60"
 is_m15 = timeframe.period == "15"
 
-// ═══════════════════════════════════════════════════
-// STATE VARIABLES (declared early to avoid forward reference errors)
-// ═══════════════════════════════════════════════════
-// H4
+// STATE VARIABLES
 var int   h4_state        = 0
 var float c1_high         = na
 var float c1_low          = na
 var int   c1_bar          = na
 var float c2_high         = na
 var float c2_low          = na
-var int   h4_direction    = 0   // 1=long, -1=short
-var float c2_wick_ext     = na  // C2 wick extreme (SL reference)
-var float dol_level       = na  // Draw on Liquidity target
-var int   setup_bar       = na  // bar_index where C3 confirmed
-var int   h4_period_start = na  // bar_index where current H4 started
-var int   c2_age          = 0   // H4 bars elapsed since C2 formed (C3 window counter)
-var int   setup_age       = 0   // H4 bars elapsed since SETUP (state 3 persistence counter)
-var label c2_lbl          = na  // current C2 label (deleted on reset)
-var label setup_lbl       = na  // current SETUP label (deleted on reset)
-var label h1_ts_lbl       = na  // current H1 TS label (deleted on reset)
-// H1
+var int   h4_direction    = 0
+var float c2_wick_ext     = na
+var float dol_level       = na
+var int   setup_bar       = na
+var int   h4_period_start = na
+var int   c2_age          = 0
+var int   setup_age       = 0
+var label c2_lbl          = na
+var label setup_lbl       = na
+var label h1_ts_lbl       = na
 var float h1_prev_high    = na
 var float h1_prev_low     = na
 var bool  h1_confirmed    = false
-var float h1_ts_prev_high = na  // prev H1 candle high at moment of TS (for box visual)
-var float h1_ts_prev_low  = na  // prev H1 candle low at moment of TS
-var int   h1_ts_bar       = na  // bar_index of the H1 TS candle
-var int   h1_ts_time      = na  // timestamp of the H1 TS candle (for xloc.bar_time label)
-// OB
+var float h1_ts_prev_high = na
+var float h1_ts_prev_low  = na
+var int   h1_ts_bar       = na
+var int   h1_ts_time      = na
 var float ob_high         = na
 var float ob_low          = na
 var int   ob_bar          = na
 var bool  ob_alerted      = false
 var int   drawn_ob_bar    = na
 
-// ═══════════════════════════════════════════════════
+// BACKTEST VARIABLES
+var float bt_entry_price  = na
+var float bt_sl_price     = na
+var float bt_tp1_price    = na
+var float bt_tp2_price    = na
+var int   bt_entry_bar    = na
+var int   bt_dir          = 0
+var int   bt_exit_reason  = 0
+var float bt_result_pips  = na
+var int   bt_total_trades = 0
+var int   bt_wins         = 0
+var float bt_total_pips   = 0.0
+var float bt_max_pips     = na
+var float bt_min_pips     = na
+
 // DAILY BIAS
-// ═══════════════════════════════════════════════════
-// lookahead_off → returns last CLOSED daily bar
 d_prev_high = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
 d_prev_low  = request.security(syminfo.tickerid, "D", low,  lookahead=barmerge.lookahead_off)
-
-// Today's running high/low tracked from intraday bars
 var float d_today_high = na
 var float d_today_low  = na
 bool new_day = ta.change(time("D")) != 0
@@ -78,44 +80,32 @@ if new_day
 else
     d_today_high := math.max(nz(d_today_high), high)
     d_today_low  := math.min(nz(d_today_low),  low)
-
-// Bias: swept prev-day extreme AND price is back inside (CRT fakeout)
 bool daily_bull = d_today_low  <= d_prev_low  and close > d_prev_low
 bool daily_bear = d_today_high >= d_prev_high and close < d_prev_high
-
 string bias_str = daily_bull and not daily_bear ? "BULLISH" : daily_bear and not daily_bull ? "BEARISH" : daily_bull and daily_bear ? "NEUTRAL*" : "NEUTRAL"
 color  bias_col = daily_bull and not daily_bear ? bull_color : daily_bear and not daily_bull ? bear_color : color.gray
 
-// ═══════════════════════════════════════════════════
 // H4 DATA
-// ═══════════════════════════════════════════════════
-// lookahead_off → returns last CLOSED H4 bar (no [1] needed)
 h4_time  = request.security(syminfo.tickerid, "240", time,  lookahead=barmerge.lookahead_off)
 h4_high  = request.security(syminfo.tickerid, "240", high,  lookahead=barmerge.lookahead_off)
 h4_low   = request.security(syminfo.tickerid, "240", low,   lookahead=barmerge.lookahead_off)
 h4_close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
-
 bool new_h4_bar = ta.change(h4_time) != 0
 
-// ═══════════════════════════════════════════════════
 // H4 STATE MACHINE
-// ═══════════════════════════════════════════════════
 if new_h4_bar
     float jc_high  = h4_high
     float jc_low   = h4_low
     float jc_close = h4_close
     int   this_c1_bar = na(h4_period_start) ? bar_index : h4_period_start
-
     if h4_state == 0
         c1_high    := jc_high
         c1_low     := jc_low
         c1_bar     := this_c1_bar
         h4_state   := 1
-
     else if h4_state == 1
         bool bull_c2 = jc_low  < c1_low  and jc_close > c1_low  and (not use_daily_bias or daily_bull)
         bool bear_c2 = jc_high > c1_high and jc_close < c1_high and (not use_daily_bias or daily_bear)
-
         if bull_c2
             h4_direction := 1
             c2_high      := jc_high
@@ -139,20 +129,16 @@ if new_h4_bar
             h4_direction := 0
             c2_wick_ext  := na
             dol_level    := na
-
     else if h4_state == 2
         c2_age := c2_age + 1
         bool bull_c3 = h4_direction ==  1 and jc_close > c2_high
         bool bear_c3 = h4_direction == -1 and jc_close < c2_low
-        // Invalidation: H4 closed beyond the C2 sweep wick (manipulation extended — not a reversal)
         bool c2_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
-
         if bull_c3 or bear_c3
             h4_state  := 3
             setup_bar := bar_index
             setup_age := 0
         else if c2_invalid or c2_age >= c3_window
-            // C3 window expired or sweep invalidated — clear labels and reset
             label.delete(c2_lbl)
             label.delete(setup_lbl)
             label.delete(h1_ts_lbl)
@@ -167,14 +153,10 @@ if new_h4_bar
             dol_level    := na
             c2_age       := 0
             h4_state     := 1
-        // else: still within C3 window — keep waiting (state stays 2, C1/C2 anchors preserved)
-
     else if h4_state == 3
         setup_age := setup_age + 1
-        // Invalidation: H4 closed beyond the C2 sweep wick — thesis dead
         bool setup_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
         if setup_invalid or setup_age >= setup_max_bars
-            // SETUP invalidated or persistence timeout — clear labels and reset
             label.delete(c2_lbl)
             label.delete(setup_lbl)
             label.delete(h1_ts_lbl)
@@ -190,16 +172,12 @@ if new_h4_bar
             setup_bar    := na
             setup_age    := 0
             h4_state     := 1
-        // else: SETUP persists across H4 bars — waiting for H1 TS / M15 OB / DOL
-
     h4_period_start := bar_index
 
-// DOL mitigated: price reached target — reset setup
+// DOL mitigated
 bool dol_mitigated = h4_state == 3 and not new_h4_bar and not na(dol_level) and
      (h4_direction == 1 ? high >= dol_level : low <= dol_level)
-
 if dol_mitigated
-    // DOL reached — clear labels and reset everything
     label.delete(c2_lbl)
     label.delete(setup_lbl)
     label.delete(h1_ts_lbl)
@@ -213,13 +191,11 @@ if dol_mitigated
     c2_age       := 0
     setup_age    := 0
     h4_state     := 1
-    // H1 reset
     h1_confirmed    := false
     h1_ts_prev_high := na
     h1_ts_prev_low  := na
     h1_ts_bar       := na
     h1_ts_time      := na
-    // OB reset
     ob_high      := na
     ob_low       := na
     ob_bar       := na
@@ -228,100 +204,72 @@ if dol_mitigated
 
 bool h4_setup_active = h4_state == 3
 
-// ═══════════════════════════════════════════════════
 // H1 DATA
-// ═══════════════════════════════════════════════════
-// Always use request.security for H1 data (consistent on all TFs including H1 itself)
-// lookahead_off returns last CLOSED H1 bar — correct on H1, M15, and H4
 h1_time  = request.security(syminfo.tickerid, "60", time,  lookahead=barmerge.lookahead_off)
 h1_high  = request.security(syminfo.tickerid, "60", high,  lookahead=barmerge.lookahead_off)
 h1_low   = request.security(syminfo.tickerid, "60", low,   lookahead=barmerge.lookahead_off)
 h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
-
 bool new_h1_bar = ta.change(h1_time) != 0
 
-// ═══════════════════════════════════════════════════
-// H1 TURTLE SOUP (confirmation layer)
-// ═══════════════════════════════════════════════════
-// Active only when h4_setup_active.
-// Detects a H1 candle that wicks beyond prev H1 extreme AND closes back inside.
-// Must align with H4 direction.
-
+// H1 TURTLE SOUP
 if new_h1_bar
     float prev_h = h1_prev_high
     float prev_l = h1_prev_low
     float jc_h   = h1_high
     float jc_l   = h1_low
     float jc_c   = h1_close
-
-    // Reset H1 state when H4 setup is not active
     if not h4_setup_active
         h1_confirmed    := false
         h1_ts_prev_high := na
         h1_ts_prev_low  := na
         h1_ts_bar       := na
         h1_ts_time      := na
-
-    // Check for H1 Turtle Soup aligned with H4 direction
     if h4_setup_active and not na(prev_h) and not na(prev_l)
-        // Long: H1 sweeps prev low, closes inside prev candle range
-        bool h1_bull_ts = h4_direction == 1 and jc_l < prev_l and jc_c > prev_l and jc_c < prev_h
-        // Short: H1 sweeps prev high, closes inside prev candle range
-        bool h1_bear_ts = h4_direction == -1 and jc_h > prev_h and jc_c < prev_h and jc_c > prev_l
-
+        bool ts_inside_c1 = jc_h <= c1_high and jc_l >= c1_low
+        bool h1_bull_ts = h4_direction == 1 and jc_l < prev_l and jc_c > prev_l and jc_c < prev_h and ts_inside_c1
+        bool h1_bear_ts = h4_direction == -1 and jc_h > prev_h and jc_c < prev_h and jc_c > prev_l and ts_inside_c1
         if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
             h1_confirmed    := true
             h1_ts_prev_high := prev_h
             h1_ts_prev_low  := prev_l
             h1_ts_bar       := bar_index
             h1_ts_time      := int(h1_time)
-
-    // Update prev H1 values AFTER the TS check (so we compare against the closed bar)
     h1_prev_high := h1_high
     h1_prev_low  := h1_low
 
-// Also reset H1 when DOL mitigated (add to existing dol_mitigated block is done in Task 13)
-// Here we just declare full_setup
 bool full_setup = h4_setup_active and h1_confirmed
 
-// ═══════════════════════════════════════════════════
-// M15 ORDER BLOCK DETECTION
-// ═══════════════════════════════════════════════════
-// OB = last opposing candle whose BODY is fully engulfed by next candle's body (Cluti rule)
-// Only active when full_setup (H4 + H1 both confirmed) AND chart is M15 (entry TF per CRT model)
+// M15 ORDER BLOCK (via request.security for cross-TF detection)
+[m15_open, m15_close, m15_open_1, m15_close_1] = request.security(syminfo.tickerid, "15",
+     [open, close, open[1], close[1]], lookahead=barmerge.lookahead_off)
 
-bool is_bull_bar  = close > open
-bool is_bear_bar  = close < open
-bool prev_is_bull = close[1] > open[1]
-bool prev_is_bear = close[1] < open[1]
+bool is_bull_bar  = m15_close > m15_open
+bool is_bear_bar  = m15_close < m15_open
+bool prev_is_bull = m15_close_1 > m15_open_1
+bool prev_is_bear = m15_close_1 < m15_open_1
+bool bull_engulf = is_bull_bar and prev_is_bear and m15_open <= m15_close_1 and m15_close >= m15_open_1
+bool bear_engulf = is_bear_bar and prev_is_bull and m15_open >= m15_close_1 and m15_close <= m15_open_1
 
-// Bullish engulfing: current bull body fully covers prev bear body
-bool bull_engulf = is_bull_bar and prev_is_bear and open <= close[1] and close >= open[1]
-// Bearish engulfing: current bear body fully covers prev bull body
-bool bear_engulf = is_bear_bar and prev_is_bull and open >= close[1] and close <= open[1]
-
-if full_setup and is_m15
+if full_setup
     if h4_direction == 1 and bull_engulf
-        ob_high    := open[1]   // bearish OB: open = body top
-        ob_low     := close[1]  // bearish OB: close = body bottom
+        ob_high    := m15_open_1
+        ob_low     := m15_close_1
         ob_bar     := bar_index - 1
         ob_alerted := false
     else if h4_direction == -1 and bear_engulf
-        ob_high    := close[1]  // bullish OB: close = body top
-        ob_low     := open[1]   // bullish OB: open = body bottom
+        ob_high    := m15_close_1
+        ob_low     := m15_open_1
         ob_bar     := bar_index - 1
         ob_alerted := false
 
-// Invalidate OB if price closes beyond C2 wick extreme
 if not na(ob_high) and not na(c2_wick_ext) and full_setup
-    if (h4_direction == 1 and close < c2_wick_ext) or
-       (h4_direction == -1 and close > c2_wick_ext)
+    if (h4_direction == 1 and m15_close < c2_wick_ext) or
+       (h4_direction == -1 and m15_close > c2_wick_ext)
         ob_high    := na
         ob_low     := na
         ob_bar     := na
         ob_alerted := false
 
-// Clear OB state when full_setup ends
 if not full_setup
     ob_high      := na
     ob_low       := na
@@ -331,11 +279,8 @@ if not full_setup
 
 bool ob_detected = full_setup and not na(ob_high)
 
-// ═══════════════════════════════════════════════════
 // TRADE LEVELS
-// ═══════════════════════════════════════════════════
-pip_size = syminfo.mintick * 10  // 1 pip for 5-decimal pairs (EUR/USD, GBP/USD)
-
+pip_size = syminfo.mintick * 10
 float entry_price = na
 float sl_price    = na
 float tp1_price   = na
@@ -356,36 +301,95 @@ if ob_detected and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
         tp2_price   := dol_level
         rr_ratio    := (entry_price - tp2_price) / (sl_price - entry_price)
 
-// ═══════════════════════════════════════════════════
+// BACKTEST ENGINE
+bool bt_in_position = not na(bt_entry_price)
+bool bt_trigger_long  = full_setup and h4_direction == 1 and bull_engulf
+bool bt_trigger_short = full_setup and h4_direction == -1 and bear_engulf
+
+if bt_trigger_long and not bt_in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+    bt_entry_price := open
+    bt_sl_price    := c2_wick_ext - 3 * pip_size
+    bt_tp1_price   := c1_low + (c1_high - c1_low) * 0.5
+    bt_tp2_price   := dol_level
+    bt_entry_bar   := bar_index + 1
+    bt_dir         := 1
+
+if bt_trigger_short and not bt_in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+    bt_entry_price := open
+    bt_sl_price    := c2_wick_ext + 3 * pip_size
+    bt_tp1_price   := c1_high - (c1_high - c1_low) * 0.5
+    bt_tp2_price   := dol_level
+    bt_entry_bar   := bar_index + 1
+    bt_dir         := -1
+
+bool bt_bars_since_entry = bt_in_position and (bar_index >= bt_entry_bar)
+
+if bt_bars_since_entry and bt_exit_reason == 0
+    int bt_bars_elapsed = bar_index - bt_entry_bar
+    if bt_dir == 1
+        if low <= bt_sl_price
+            bt_exit_reason := 3
+            bt_result_pips := -(bt_sl_price - bt_entry_price) / pip_size
+        else if high >= bt_tp2_price
+            bt_exit_reason := 1
+            bt_result_pips := (bt_tp2_price - bt_entry_price) / pip_size
+        else if high >= bt_tp1_price
+            bt_exit_reason := 2
+            bt_result_pips := (bt_tp1_price - bt_entry_price) / pip_size
+        else if bt_bars_elapsed >= 10
+            bt_exit_reason := 4
+            bt_result_pips := (close - bt_entry_price) / pip_size
+    if bt_dir == -1
+        if high >= bt_sl_price
+            bt_exit_reason := 3
+            bt_result_pips := (bt_sl_price - bt_entry_price) / pip_size
+        else if low <= bt_tp2_price
+            bt_exit_reason := 1
+            bt_result_pips := (bt_entry_price - bt_tp2_price) / pip_size
+        else if low <= bt_tp1_price
+            bt_exit_reason := 2
+            bt_result_pips := (bt_entry_price - bt_tp1_price) / pip_size
+        else if bt_bars_elapsed >= 10
+            bt_exit_reason := 4
+            bt_result_pips := (bt_entry_price - close) / pip_size
+
+if bt_exit_reason != 0
+    bt_total_trades += 1
+    if bt_result_pips > 0
+        bt_wins += 1
+    bt_total_pips += bt_result_pips
+    bt_max_pips := na(bt_max_pips) ? bt_result_pips : math.max(bt_max_pips, bt_result_pips)
+    bt_min_pips := na(bt_min_pips) ? bt_result_pips : math.min(bt_min_pips, bt_result_pips)
+    bt_entry_price := na
+    bt_sl_price    := na
+    bt_tp1_price   := na
+    bt_tp2_price   := na
+    bt_entry_bar   := na
+    bt_dir         := 0
+    bt_exit_reason := 0
+
+float bt_win_rate = bt_total_trades > 0 ? bt_wins / bt_total_trades * 100 : 0.0
+float bt_avg_pips = bt_total_trades > 0 ? bt_total_pips / bt_total_trades : 0.0
+
 // ALERT
-// ═══════════════════════════════════════════════════
 if ob_detected and not ob_alerted
     ob_alerted := true
-    alert(
-         "CRT Setup — " + syminfo.ticker + " | " + str.tostring(timeframe.period) + "m\n" +
+    alert("CRT Setup - " + syminfo.ticker + " | " + str.tostring(timeframe.period) + "m\n" +
          "Direction: " + (h4_direction == 1 ? "LONG" : "SHORT") + "\n" +
          "Entry: "     + str.tostring(entry_price, "#.#####") + "\n" +
          "SL: "        + str.tostring(sl_price,    "#.#####") + "\n" +
          "TP1: "       + str.tostring(tp1_price,   "#.#####") + "  (50% H4 C1 range)\n" +
          "TP2 / DOL: " + str.tostring(tp2_price,   "#.#####") + "\n" +
-         "RR: 1:"      + str.tostring(rr_ratio,    "#.##"),
-         alert.freq_once_per_bar_close)
+         "RR: 1:"      + str.tostring(rr_ratio,    "#.##"), alert.freq_once_per_bar_close)
 
-// ═══════════════════════════════════════════════════
-// VISUALS — H4 C1 BOX
-// ═══════════════════════════════════════════════════
-// Primary on H4, faded on H1/M15. Hidden on other TFs.
+// VISUALS - H4 C1 BOX
 bool show_h4_c1 = (is_h4 or is_h1 or is_m15) and show_c1_box and not na(c1_high) and not na(c1_bar)
 color c1_box_color = is_h4 ? c1_color : color.new(color.gray, 90)
-
 var box c1_box_obj = na
-
 if show_h4_c1
     if na(c1_box_obj)
-        c1_box_obj := box.new(
-             left=c1_bar, top=c1_high, right=bar_index + 50, bottom=c1_low,
-             border_color=color.new(color.gray, 60), bgcolor=c1_box_color,
-             extend=extend.right, xloc=xloc.bar_index)
+        c1_box_obj := box.new(left=c1_bar, top=c1_high, right=bar_index + 50, bottom=c1_low,
+             border_color=color.new(color.gray, 60), bgcolor=c1_box_color, extend=extend.right, xloc=xloc.bar_index)
     else
         box.set_left(c1_box_obj,   c1_bar)
         box.set_top(c1_box_obj,    c1_high)
@@ -393,14 +397,10 @@ if show_h4_c1
         box.set_right(c1_box_obj,  bar_index + 50)
         box.set_bgcolor(c1_box_obj, c1_box_color)
 
-// ═══════════════════════════════════════════════════
-// VISUALS — DOL LINE
-// ═══════════════════════════════════════════════════
+// VISUALS - DOL LINE
 bool show_dol_line = (is_h4 or is_h1 or is_m15) and show_dol
-
 var line  dol_line_obj  = na
 var label dol_label_obj = na
-
 if show_dol_line
     if h4_state == 3 and not na(dol_level) and not na(setup_bar)
         color _dol_col = h4_direction == 1 ? bull_color : bear_color
@@ -408,8 +408,7 @@ if show_dol_line
             dol_line_obj  := line.new(x1=setup_bar, y1=dol_level, x2=bar_index + 50, y2=dol_level,
                  color=color.new(_dol_col, 20), style=line.style_dashed, width=2, extend=extend.right)
             dol_label_obj := label.new(bar_index + 2, dol_level, "DOL",
-                 color=color.new(_dol_col, 80), textcolor=_dol_col,
-                 style=label.style_label_left, size=size.tiny)
+                 color=color.new(_dol_col, 80), textcolor=_dol_col, style=label.style_label_left, size=size.tiny)
         else
             line.set_x2(dol_line_obj, bar_index + 50)
             label.set_x(dol_label_obj, bar_index + 2)
@@ -420,9 +419,7 @@ if show_dol_line
             dol_line_obj  := na
             dol_label_obj := na
 
-// ═══════════════════════════════════════════════════
-// VISUALS — H4 C2/C3 LABELS (H4 chart only)
-// ═══════════════════════════════════════════════════
+// VISUALS - H4 C2/C3 LABELS
 if is_h4 and new_h4_bar
     if h4_state == 2
         color _c2_col = h4_direction == 1 ? bull_color : bear_color
@@ -439,12 +436,8 @@ if is_h4 and new_h4_bar
              style=h4_direction == 1 ? label.style_label_up : label.style_label_down,
              yloc=yloc.price, xloc=xloc.bar_time, size=size.small)
 
-// ═══════════════════════════════════════════════════
-// VISUALS — H1 TURTLE SOUP LABEL (H1 chart only)
-// ═══════════════════════════════════════════════════
-// Fires once on the bar where H1 TS is confirmed
+// VISUALS - H1 TS LABEL
 if is_h1 and new_h1_bar and h4_setup_active and h1_confirmed
-    // Check: was this the bar where h1_ts_bar was just set?
     if h1_ts_bar == bar_index and not na(h1_ts_time)
         color _ts_col = h4_direction == 1 ? bull_color : bear_color
         label.delete(h1_ts_lbl)
@@ -453,11 +446,8 @@ if is_h1 and new_h1_bar and h4_setup_active and h1_confirmed
              style=h4_direction == 1 ? label.style_label_up : label.style_label_down,
              yloc=yloc.price, xloc=xloc.bar_time, size=size.small)
 
-// ═══════════════════════════════════════════════════
-// VISUALS — M15 OB BOX + ENTRY/SL/TP LINES
-// ═══════════════════════════════════════════════════
+// VISUALS - M15 OB BOX + LEVELS
 color _col = h4_direction == 1 ? bull_color : bear_color
-
 var box   ob_box_obj = na
 var line  entry_ln   = na
 var line  sl_ln      = na
@@ -465,7 +455,6 @@ var line  tp1_ln     = na
 var line  tp2_ln     = na
 var label rr_lbl     = na
 
-// When OB changes, delete old drawings so they get recreated with new levels
 bool ob_changed = ob_detected and not na(ob_bar) and ob_bar != drawn_ob_bar
 if ob_changed
     box.delete(ob_box_obj)
@@ -485,35 +474,25 @@ if ob_changed
 if ob_detected and not na(ob_bar) and not na(entry_price) and is_m15
     if show_ob_box
         if na(ob_box_obj)
-            ob_box_obj := box.new(
-                 left=ob_bar, top=ob_high, right=bar_index + 50, bottom=ob_low,
-                 border_color=color.new(_col, 30), bgcolor=color.new(_col, 80),
-                 extend=extend.right, xloc=xloc.bar_index)
+            ob_box_obj := box.new(left=ob_bar, top=ob_high, right=bar_index + 50, bottom=ob_low,
+                 border_color=color.new(_col, 30), bgcolor=color.new(_col, 80), extend=extend.right, xloc=xloc.bar_index)
         else
             box.set_right(ob_box_obj, bar_index + 50)
-
     if show_levels
         if na(entry_ln)
-            entry_ln := line.new(ob_bar, entry_price, bar_index + 50, entry_price,
-                 color=_col, width=1, extend=extend.right, xloc=xloc.bar_index)
-            sl_ln    := line.new(ob_bar, sl_price,    bar_index + 50, sl_price,
-                 color=bear_color, style=line.style_dashed, width=1, extend=extend.right, xloc=xloc.bar_index)
-            tp1_ln   := line.new(ob_bar, tp1_price,   bar_index + 50, tp1_price,
-                 color=color.orange, style=line.style_dashed, width=1, extend=extend.right, xloc=xloc.bar_index)
-            tp2_ln   := line.new(ob_bar, tp2_price,   bar_index + 50, tp2_price,
-                 color=bull_color, style=line.style_dashed, width=2, extend=extend.right, xloc=xloc.bar_index)
+            entry_ln := line.new(ob_bar, entry_price, bar_index + 50, entry_price, color=_col, width=1, extend=extend.right, xloc=xloc.bar_index)
+            sl_ln    := line.new(ob_bar, sl_price,    bar_index + 50, sl_price,    color=bear_color, style=line.style_dashed, width=1, extend=extend.right, xloc=xloc.bar_index)
+            tp1_ln   := line.new(ob_bar, tp1_price,   bar_index + 50, tp1_price,   color=color.orange, style=line.style_dashed, width=1, extend=extend.right, xloc=xloc.bar_index)
+            tp2_ln   := line.new(ob_bar, tp2_price,   bar_index + 50, tp2_price,   color=bull_color, style=line.style_dashed, width=2, extend=extend.right, xloc=xloc.bar_index)
         else
             line.set_x2(entry_ln, bar_index + 50)
             line.set_x2(sl_ln,    bar_index + 50)
             line.set_x2(tp1_ln,   bar_index + 50)
             line.set_x2(tp2_ln,   bar_index + 50)
-
     if show_rr and not na(rr_ratio)
         if na(rr_lbl)
-            rr_lbl := label.new(bar_index + 2, tp2_price,
-                 "RR 1:" + str.tostring(rr_ratio, "#.#"),
-                 color=color.new(bull_color, 80), textcolor=bull_color,
-                 style=label.style_label_left, size=size.tiny)
+            rr_lbl := label.new(bar_index + 2, tp2_price, "RR 1:" + str.tostring(rr_ratio, "#.#"),
+                 color=color.new(bull_color, 80), textcolor=bull_color, style=label.style_label_left, size=size.tiny)
         else
             label.set_x(rr_lbl, bar_index + 2)
 else
@@ -531,24 +510,24 @@ else
     rr_lbl     := na
     drawn_ob_bar := na
 
+// BACKTEST VISUALS
+plotshape(bt_trigger_long and show_backtest,  title="BT LONG",  style=shape.triangleup,   location=location.belowbar, color=color.new(bull_color, 20), size=size.tiny)
+plotshape(bt_trigger_short and show_backtest, title="BT SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(bear_color, 20), size=size.tiny)
+plotchar(bt_in_position and bt_dir == 1 and show_backtest,  title="BT In LONG",  char="▲", color=color.new(bull_color, 40), location=location.abovebar)
+plotchar(bt_in_position and bt_dir == -1 and show_backtest, title="BT In SHORT", char="▼", color=color.new(bear_color, 40), location=location.belowbar)
+plotchar(bt_exit_reason == 1 and show_backtest, title="BT EXIT TP2", char="●", color=color.blue,   location=location.abovebar, size=size.small)
+plotchar(bt_exit_reason == 2 and show_backtest, title="BT EXIT TP1", char="●", color=color.orange, location=location.abovebar, size=size.small)
+plotchar(bt_exit_reason == 3 and show_backtest, title="BT EXIT SL",  char="●", color=color.red,    location=location.abovebar, size=size.small)
+plotchar(bt_exit_reason == 4 and show_backtest, title="BT EXIT TMO", char="●", color=color.gray,   location=location.abovebar, size=size.small)
 
-// ═══════════════════════════════════════════════════
 // INFO PANEL
-// ═══════════════════════════════════════════════════
 string h4_state_str = h4_state == 0 ? "IDLE" : h4_state == 1 ? "C1" : h4_state == 2 ? (h4_direction == 1 ? "C2 LONG" : "C2 SHORT") : h4_state == 3 ? (h4_direction == 1 ? "SETUP ▲" : "SETUP ▼") : "?"
 color  h4_state_col = h4_state == 3 ? (h4_direction == 1 ? bull_color : bear_color) : h4_state == 2 ? color.orange : color.gray
-
 string h1_conf_str = not h4_setup_active ? "—" : h1_confirmed ? "CONFIRMED ✓" : "WAIT"
 color  h1_conf_col = not h4_setup_active ? color.gray : h1_confirmed ? bull_color : color.orange
-
 string dol_str = (not h4_setup_active or na(dol_level)) ? "—" : str.tostring(dol_level, "#.#####")
-
-string status_str = ob_detected                              ? "OB ▶ ENTRY" :
-     full_setup and not ob_detected                          ? "WAIT OB" :
-     h4_setup_active and not h1_confirmed                    ? "WAIT H1 TS" :
-     h4_state == 2                                           ? "WAIT C3" : "—"
-color  status_col = ob_detected                              ? (h4_direction == 1 ? bull_color : bear_color) :
-     h4_state >= 2                                           ? color.orange : color.gray
+string status_str = ob_detected ? "OB ▶ ENTRY" : full_setup and not ob_detected ? "WAIT OB" : h4_setup_active and not h1_confirmed ? "WAIT H1 TS" : h4_state == 2 ? "WAIT C3" : "—"
+color  status_col = ob_detected ? (h4_direction == 1 ? bull_color : bear_color) : h4_state >= 2 ? color.orange : color.gray
 
 color col_lbl = color.rgb(200, 200, 210)
 color col_dol = color.rgb(100, 160, 255)
@@ -560,35 +539,63 @@ var table info_tbl = table.new(position.top_right, 2, 5,
      frame_color=color.new(color.gray, 40), frame_width=1)
 
 if barstate.islast and show_panel
-    table.cell(info_tbl, 0, 0, "BIAS",        text_color=col_lbl,       text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 1, 0, bias_str,       text_color=bias_col,      text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 0, 1, "H4",           text_color=col_lbl,       text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 1, 1, h4_state_str,   text_color=h4_state_col,  text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 0, 2, "H1",           text_color=col_lbl,       text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 1, 2, h1_conf_str,    text_color=h1_conf_col,   text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 0, 3, "STATUS",       text_color=col_lbl,       text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 1, 3, status_str,     text_color=status_col,    text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 0, 4, "DOL",          text_color=col_lbl,       text_size=size.normal, bgcolor=col_bg)
-    table.cell(info_tbl, 1, 4, dol_str,        text_color=col_dol,       text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 0, 0, "BIAS",  text_color=col_lbl,  text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 1, 0, bias_str, text_color=bias_col, text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 0, 1, "H4",     text_color=col_lbl,  text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 1, 1, h4_state_str, text_color=h4_state_col, text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 0, 2, "H1",     text_color=col_lbl,  text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 1, 2, h1_conf_str, text_color=h1_conf_col, text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 0, 3, "STATUS", text_color=col_lbl,  text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 1, 3, status_str, text_color=status_col, text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 0, 4, "DOL",    text_color=col_lbl,  text_size=size.normal, bgcolor=col_bg)
+    table.cell(info_tbl, 1, 4, dol_str,  text_color=col_dol,  text_size=size.normal, bgcolor=col_bg)
 
-// ═══════════════════════════════════════════════════
-// VISUALS — H1 RANGE BOX (H1 and M15 charts)
-// ═══════════════════════════════════════════════════
-// Shows the range of the H1 candle PRIOR to the Turtle Soup
-// Helps visualize the H1 sweet zone for entry
+// BACKTEST STATS TABLE
+var table bt_tbl = table.new(position.bottom_right, 3, 10,
+     bgcolor=color.new(color.black, 20),
+     border_color=color.new(color.gray, 50), border_width=1)
+
+if barstate.islast and show_backtest
+    table.cell(bt_tbl, 0, 0, "TRADES", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 1, 0, "WINS",   text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 2, 0, "WIN%",   text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 0, 1, str.tostring(bt_total_trades),          text_color=color.white,  text_size=size.normal)
+    table.cell(bt_tbl, 1, 1, str.tostring(bt_wins),                  text_color=color.green,  text_size=size.normal)
+    table.cell(bt_tbl, 2, 1, str.tostring(bt_win_rate, "#.#") + "%", text_color=color.yellow, text_size=size.normal)
+    table.cell(bt_tbl, 0, 2, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 1, 2, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 2, 2, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 0, 3, "AVG PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 1, 3, "MAX PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 2, 3, "MIN PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 0, 4, str.tostring(bt_avg_pips, "#.#"), text_color=color.white, text_size=size.normal)
+    table.cell(bt_tbl, 1, 4, na(bt_max_pips) ? "—" : str.tostring(bt_max_pips, "#.#"), text_color=color.green, text_size=size.normal)
+    table.cell(bt_tbl, 2, 4, na(bt_min_pips) ? "—" : str.tostring(bt_min_pips, "#.#"), text_color=color.red, text_size=size.normal)
+    table.cell(bt_tbl, 0, 5, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 1, 5, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 2, 5, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 0, 6, "H4 STATE", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 1, 6, "H1 CONF",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 2, 6, "OB TRIG",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    string _h4_str = h4_state == 0 ? "IDLE" : h4_state == 1 ? "C1" : h4_state == 2 ? "C2" : "SETUP"
+    table.cell(bt_tbl, 0, 7, _h4_str, text_color=color.white, text_size=size.small)
+    table.cell(bt_tbl, 1, 7, h1_confirmed ? "✓" : "✗", text_color=h1_confirmed ? color.green : color.gray, text_size=size.small)
+    table.cell(bt_tbl, 2, 7, (bt_trigger_long or bt_trigger_short) ? "⚡" : "—", text_color=color.yellow, text_size=size.small)
+    table.cell(bt_tbl, 0, 8, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 1, 8, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 2, 8, "", bgcolor=color.new(color.black, 60))
+    table.cell(bt_tbl, 0, 9, "TOTAL PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(bt_tbl, 1, 9, str.tostring(bt_total_pips, "+#.##;-#.##"), text_color=bt_total_pips >= 0 ? color.green : color.red, text_size=size.large)
+    table.cell(bt_tbl, 2, 9, "", bgcolor=color.new(color.black, 20))
+
+// VISUALS - H1 RANGE BOX
 bool show_h1_range = (is_h1 or is_m15) and show_h1_box and h1_confirmed and not na(h1_ts_prev_high)
-
 color h1_box_col = is_h1 ? color.new(h4_direction == 1 ? bull_color : bear_color, 85) : color.new(color.gray, 92)
-
 var box h1_box_obj = na
-
 if show_h1_range
     if na(h1_box_obj)
-        h1_box_obj := box.new(
-             left=h1_ts_bar, top=h1_ts_prev_high, right=bar_index + 50, bottom=h1_ts_prev_low,
-             border_color=color.new(h4_direction == 1 ? bull_color : bear_color, 50),
-             bgcolor=h1_box_col,
-             extend=extend.right, xloc=xloc.bar_index)
+        h1_box_obj := box.new(left=h1_ts_bar, top=h1_ts_prev_high, right=bar_index + 50, bottom=h1_ts_prev_low,
+             border_color=color.new(h4_direction == 1 ? bull_color : bear_color, 50), bgcolor=h1_box_col, extend=extend.right, xloc=xloc.bar_index)
     else
         box.set_right(h1_box_obj, bar_index + 50)
         box.set_bgcolor(h1_box_obj, h1_box_col)

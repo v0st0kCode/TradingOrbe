@@ -148,8 +148,9 @@ if new_h1
         h1_confirmed := false
 
     if h4_setup_active and not na(h1_prev_high) and not na(h1_prev_low)
-        bool h1_bull_ts = h4_direction == 1 and jc_l < h1_prev_low and jc_c > h1_prev_low and jc_c < h1_prev_high
-        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low
+        bool ts_inside_c1 = jc_h <= c1_high and jc_l >= c1_low
+        bool h1_bull_ts = h4_direction == 1 and jc_l < h1_prev_low and jc_c > h1_prev_low and jc_c < h1_prev_high and ts_inside_c1
+        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low and ts_inside_c1
 
         if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
             h1_confirmed := true
@@ -161,15 +162,19 @@ if new_h1
 bool full_setup = h4_setup_active and h1_confirmed
 
 // ═══════════════════════════════════════════════════
-// M15 ORDER BLOCK (same engulfing logic as crt-unified)
+// M15 ORDER BLOCK (via request.security for cross-TF detection)
 // ═══════════════════════════════════════════════════
-bool is_bull    = close > open
-bool is_bear    = close < open
-bool prev_is_bull = close[1] > open[1]
-bool prev_is_bear = close[1] < open[1]
+// Always read M15 data regardless of chart timeframe
+[m15_open, m15_close, m15_open_1, m15_close_1] = request.security(syminfo.tickerid, "15", 
+     [open, close, open[1], close[1]], lookahead=barmerge.lookahead_off)
 
-bool bull_engulf = is_bull and prev_is_bear and open <= close[1] and close >= open[1]
-bool bear_engulf = is_bear and prev_is_bull and open >= close[1] and close <= open[1]
+bool m15_bull    = m15_close > m15_open
+bool m15_bear    = m15_close < m15_open
+bool m15_prev_bull = m15_close_1 > m15_open_1
+bool m15_prev_bear = m15_close_1 < m15_open_1
+
+bool bull_engulf = m15_bull and m15_prev_bear and m15_open <= m15_close_1 and m15_close >= m15_open_1
+bool bear_engulf = m15_bear and m15_prev_bull and m15_open >= m15_close_1 and m15_close <= m15_open_1
 
 bool ob_trigger_long  = full_setup and h4_direction == 1 and bull_engulf
 bool ob_trigger_short = full_setup and h4_direction == -1 and bear_engulf
@@ -253,6 +258,7 @@ if exit_reason != 0
     tp2_price   := na
     entry_bar   := na
     dir         := 0
+    exit_reason := 0
 
 // ═══════════════════════════════════════════════════
 // STATS ACCUMULATION
