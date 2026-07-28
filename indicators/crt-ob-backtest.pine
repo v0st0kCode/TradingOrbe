@@ -126,6 +126,14 @@ bool h4_setup_active = h4_state == 3
 
 // ═══════════════════════════════════════════════════
 // H1 TURTLE SOUP
+// Protocolo real (fuente: notebook CRT metodología, no la versión anterior):
+// 1. Mientras se forma C2 (h4_state==2), localizar la vela H1 concreta que
+//    perfora el nivel de C1 — esa vela pasa a ser la referencia LTF C1.
+// 2. La confirmación es que una vela H1 posterior barra el extremo de ESA
+//    vela de contacto y cierre de vuelta dentro de su rango.
+// (Antes: barría la vela H1 anterior genérica + exigía quedar dentro del
+// rango C1 completo, que ya está desactualizado en cuanto arranca C2 —
+// por eso nunca confirmaba.)
 // ═══════════════════════════════════════════════════
 h1_time  = request.security(syminfo.tickerid, "60", time,  lookahead=barmerge.lookahead_off)
 h1_high  = request.security(syminfo.tickerid, "60", high,  lookahead=barmerge.lookahead_off)
@@ -134,10 +142,12 @@ h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lo
 
 bool new_h1 = ta.change(h1_time) != 0
 
-var float h1_prev_high  = na
-var float h1_prev_low   = na
-var bool  h1_confirmed  = false
-var int   h1_ts_bar     = na
+var bool  h1_confirmed   = false
+var int   h1_ts_bar      = na
+var int   contact_c1_bar = na
+var float ltf_c1_high    = na
+var float ltf_c1_low     = na
+var bool  contact_found  = false
 
 if new_h1
     float jc_h = h1_high
@@ -147,17 +157,27 @@ if new_h1
     if not h4_setup_active
         h1_confirmed := false
 
-    if h4_setup_active and not na(h1_prev_high) and not na(h1_prev_low)
-        bool ts_inside_c1 = jc_h <= c1_high and jc_l >= c1_low
-        bool h1_bull_ts = h4_direction == 1 and jc_l < h1_prev_low and jc_c > h1_prev_low and jc_c < h1_prev_high and ts_inside_c1
-        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low and ts_inside_c1
+    if contact_c1_bar != c1_bar
+        contact_found  := false
+        ltf_c1_high    := na
+        ltf_c1_low     := na
+        contact_c1_bar := c1_bar
+
+    if h4_state == 2 and not contact_found
+        bool pierces_low  = h4_direction == 1  and jc_l < c1_low
+        bool pierces_high = h4_direction == -1 and jc_h > c1_high
+        if pierces_low or pierces_high
+            ltf_c1_high   := jc_h
+            ltf_c1_low    := jc_l
+            contact_found := true
+
+    if h4_setup_active and contact_found and not na(ltf_c1_high) and not na(ltf_c1_low)
+        bool h1_bull_ts = h4_direction == 1  and jc_l < ltf_c1_low  and jc_c > ltf_c1_low  and jc_c < ltf_c1_high
+        bool h1_bear_ts = h4_direction == -1 and jc_h > ltf_c1_high and jc_c < ltf_c1_high and jc_c > ltf_c1_low
 
         if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
             h1_confirmed := true
             h1_ts_bar    := bar_index
-
-    h1_prev_high := h1_high
-    h1_prev_low  := h1_low
 
 bool full_setup = h4_setup_active and h1_confirmed
 
