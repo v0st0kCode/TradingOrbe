@@ -1,48 +1,52 @@
-# H1 Turtle Soup — Bug Real Encontrado y Corregido
+# CRT OB Backtest — 3 Bugs Reales Encontrados (28 jul 2026)
 
-**Fecha:** 2026-07-28
-**Contexto:** Validación de valor real antes de comprometerse a usar TradingOrbe. El backtest anterior (2025-06-02) reportó 0 trades en EURUSD y lo atribuyó a "estrategia muy selectiva". Esa conclusión no estaba verificada.
+**Contexto:** Validación de valor real antes de comprometerse a usar TradingOrbe. El backtest anterior (2025-06-02) reportó 0 trades en EURUSD y lo atribuyó a "estrategia muy selectiva". Esa conclusión no estaba verificada — se auditó con datos reales.
 
-## Validación en TradingView (datos reales)
+## Validación inicial (post-fix H1, pre-fix stats)
 
 | Par | Periodo M15 | Trades |
 |---|---|---|
 | EURUSD | Ene 2024–Jun 2025 (backtest previo) | 0 |
-| XAUUSD | Abr–Jul 2026 (~3 meses) | 0 |
-| GBPUSD | Abr–Jul 2026 (~3 meses) | 0 |
+| XAUUSD | Abr–Jul 2026 (~3 meses, techo real de la API) | 0 → luego 7 tras fixes |
+| GBPUSD | Abr–Jul 2026 (~5 días, datos limitados esa sesión) | 0 |
 
-0 trades en 3 pares distintos, incluyendo XAUUSD (el más volátil, recomendado explícitamente por el propio análisis anterior). Eso descarta "selectividad por diseño" como única explicación.
+## Bug 1 — H1 Turtle Soup nunca confirmaba (RESUELTO)
 
-## Bug encontrado
+Consultado el notebook de metodología CRT (`02763094-8e89-4408-a18e-d96fa67eef7d`) en vez de adivinar. Protocolo real: mientras se forma C2, localizar la vela H1 concreta que perfora C1 (nueva referencia LTF), y confirmar cuando una vela H1 posterior barre EL EXTREMO DE ESA VELA CONCRETA y cierra dentro.
 
-Consultado directamente el notebook de metodología CRT (`02763094-8e89-4408-a18e-d96fa67eef7d`) para no adivinar. Protocolo real de confirmación H1 Turtle Soup:
+El código usaba la vela H1 anterior genérica (`h1_prev_high/low`) + exigía quedar dentro del rango C1 completo (ya desactualizado en cuanto arranca C2) — combinación casi geométricamente imposible.
 
-1. Mientras se forma la vela H4 C2, localizar la vela H1 **concreta** que perfora el nivel de C1 — esa vela se convierte en la nueva referencia (LTF C1).
-2. La confirmación es que una vela H1 **posterior** barra el extremo de **esa vela de contacto específica** y cierre de vuelta dentro de su rango.
+**Fix:** reescrita la detección de vela de contacto (`contact_found`, `ltf_c1_high/low`) en `crt-ob-backtest.pine` y `crt-unified.pine`. Confirmado con datos: 0 → 2 confirmaciones en 51 setups H4 completados (3 meses XAUUSD).
 
-**Lo que hacía el código (`crt-ob-backtest.pine` y `crt-unified.pine`):**
-- Usaba la vela H1 *inmediatamente anterior* (rolling `h1_prev_high/low`) como referencia a barrer — no la vela de contacto específica.
-- Exigía además que la vela quedara **dentro del rango C1 completo** (`ts_inside_c1`), que ya está desactualizado en cuanto arranca C2 (el setup existe precisamente porque el precio ya salió de ese rango).
+## Bug 2 — Stats nunca contaban los cierres (RESUELTO)
 
-Combinación que hacía la confirmación casi geométricamente imposible: pedía que el precio, ya en fase de expansión fuera del rango C1, volviera a quedar contenido dentro de ese mismo rango. Coincide exactamente con el patrón observado: el estado se quedaba siempre en `H1 CONF: ✗`.
+El bloque "cerrar posición" reseteaba `exit_reason := 0` **antes** de que el bloque de estadísticas lo leyera — mismo bar, orden de ejecución equivocado. Resultado: `total_trades` se quedaba en 0 aunque el motor sí abriera y cerrara posiciones (Order Block disparó 7 veces, trades mostraba 0).
 
-## Fix aplicado
+**Fix:** reordenado — acumulación de stats ANTES del bloque de cierre. Confirmado: `total_trades` pasó de 0 a 7.
 
-Reescrita la sección H1 Turtle Soup en ambos indicadores (`crt-ob-backtest.pine`, `crt-unified.pine`):
-- Nuevo tracking: `contact_found` / `ltf_c1_high` / `ltf_c1_low` — detecta la vela H1 de contacto durante `h4_state==2` (formación de C2).
-- La confirmación ahora barre y reclama el extremo de esa vela de contacto específica, no la vela H1 genérica anterior ni el rango C1 completo.
-- Compilado en TradingView sin errores (solo warning de versión Pine v5→v6, no bloqueante).
+## Bug 3 — Contradicción de diseño TP/SL vs modelo de entrada (SIN RESOLVER)
 
-## Estado de la validación — honesto
+Con los bugs 1 y 2 arreglados, los 7 trades cerrados dieron win rate 0% y magnitudes de pips imposibles (avg -13444, min -20007). Diagnóstico con datos reales del último trade:
 
-**No se pudo re-testear con volumen estadístico suficiente.** La API de TradingView usada en la automatización limitó el historial M15 cargable a ~5 días (~500 barras) en esta sesión, pese a que en un intento aislado sí cargó ~3 meses de XAUUSD. No es un límite del código corregido — es una limitación de la sesión de datos.
+- Entrada: 5012.24
+- TP1: 4817.37 (punto medio del rango C1)
+- TP2: 4875.25 (= high de C1)
+- **La entrada está por encima de ambos take-profits.**
 
-En los ~5 días disponibles tras el fix (XAUUSD, tendencia sostenida sin estructura de rango-barrido clara), no se formó ningún setup completo — resultado esperado dado que ni siquiera se completó un ciclo C1→C2→C3 en esa ventana, no indica que el fix no funcione.
+**Causa raíz:** el modelo de entrada (C3 confirma displacement fuera de C1 + pullback Order Block en M15) es una entrada de **continuación** — se compra después de que el precio ya rompió y se alejó de C1. Pero TP1/TP2 apuntan de vuelta hacia el rango C1 — eso es lógica de **reversión a la media**. Dos modelos de entrada distintos con objetivos contradictorios: para cuando se ejecuta la entrada de continuación, los "objetivos" de reversión ya quedaron atrás.
 
-## Próximo paso real
+No es un typo — es una decisión de diseño de la estrategia sin resolver. Requiere definir el modelo de TP correcto para entradas de continuación (ej. extensión de Fibonacci desde C2, o un modelo de entrada de reversión distinto) contra el notebook de metodología.
 
-Validación estadística pendiente. Dos caminos:
-1. **Dejarlo correr en real** — el indicador ya está en el chart de TradingView (XAUUSD M15) con el fix aplicado. Revisar en unos días/semana si `H1 CONF` pasa a `✓` alguna vez y si se acumulan trades.
-2. **Cargar más historial manualmente** en la app (scroll manual suele traer más barras que la automatización) y re-consultar la tabla de stats.
+## Instrumentación añadida
 
-No se declara esto "arreglado y validado" — se declara "bug real identificado y corregido contra la fuente de metodología, pendiente de confirmar con datos que de verdad produce setups viables".
+El indicador ahora expone en su panel de stats (además de trades/win%/pips):
+- **C3 # / H1 # / OB #** — contador acumulado de cada fase del funnel en todo el histórico cargado (no solo el último bar)
+- **ENTRY / SL / GAP** y **TP1/TP2 / PIPSIZE / DIR-EXIT** del último trade cerrado — para diagnóstico rápido sin tener que re-instrumentar cada vez
+
+## Estado real — honesto
+
+**No usar este indicador para operar todavía.** Los bugs 1 y 2 están arreglados y confirmados con datos. El bug 3 es estructural y necesita resolverse antes de que las cifras de rentabilidad signifiquen algo. El sistema de detección de setups (H4+H1+M15) funciona; el sistema de gestión de la operación (TP/SL) no está alineado con el modelo de entrada.
+
+## Próximo paso
+
+Resolver bug 3: definir el modelo de TP correcto para entrada de continuación, contra el notebook de metodología, y volver a correr el backtest.

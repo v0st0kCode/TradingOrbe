@@ -50,6 +50,9 @@ var float dol_level    = na
 var int   setup_bar    = na
 var int   c2_age       = 0
 var int   setup_age    = 0
+var int   c3_count     = 0
+var int   h1_count     = 0
+var int   ob_count     = 0
 
 if new_h4
     float jc_high  = h4_high
@@ -98,6 +101,7 @@ if new_h4
             h4_state  := 3
             setup_bar := bar_index
             setup_age := 0
+            c3_count  += 1
         else if c2_invalid or c2_age >= c3_window
             c1_high  := jc_high
             c1_low   := jc_low
@@ -178,6 +182,7 @@ if new_h1
         if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
             h1_confirmed := true
             h1_ts_bar    := bar_index
+            h1_count     += 1
 
 bool full_setup = h4_setup_active and h1_confirmed
 
@@ -198,6 +203,9 @@ bool bear_engulf = m15_bear and m15_prev_bull and m15_open >= m15_close_1 and m1
 
 bool ob_trigger_long  = full_setup and h4_direction == 1 and bull_engulf
 bool ob_trigger_short = full_setup and h4_direction == -1 and bear_engulf
+
+if ob_trigger_long or ob_trigger_short
+    ob_count += 1
 
 // ═══════════════════════════════════════════════════
 // BACKTEST ENGINE
@@ -270,6 +278,43 @@ if bars_since_entry and exit_reason == 0
             exit_reason := 4
             result_pips := (entry_price - close) / pip_size
 
+// ═══════════════════════════════════════════════════
+// STATS ACCUMULATION
+// (debe ir ANTES del cierre — el bloque de cierre resetea exit_reason
+// a 0 y si las stats se leen después, nunca ven el cierre. Ese era el
+// bug: OB disparaba 7 veces en 3 meses pero total_trades quedaba en 0.)
+// ═══════════════════════════════════════════════════
+var int   total_trades   = 0
+var int   wins           = 0
+var float total_pips     = 0.0
+var float max_pips       = na
+var float min_pips       = na
+var float dbg_entry      = na
+var float dbg_sl         = na
+var float dbg_tp1        = na
+var float dbg_tp2        = na
+var float dbg_raw_sl_gap = na
+var int   dbg_exit_reason = na
+var int   dbg_dir        = na
+
+if exit_reason != 0
+    total_trades += 1
+    if result_pips > 0
+        wins += 1
+    total_pips += result_pips
+    max_pips := na(max_pips) ? result_pips : math.max(max_pips, result_pips)
+    min_pips := na(min_pips) ? result_pips : math.min(min_pips, result_pips)
+    dbg_entry       := entry_price
+    dbg_sl          := sl_price
+    dbg_tp1         := tp1_price
+    dbg_tp2         := tp2_price
+    dbg_raw_sl_gap  := sl_price - entry_price
+    dbg_exit_reason := exit_reason
+    dbg_dir         := dir
+
+float win_rate = total_trades > 0 ? wins / total_trades * 100 : 0.0
+float avg_pips = total_trades > 0 ? total_pips / total_trades : 0.0
+
 // Close position after exit recorded
 if exit_reason != 0
     entry_price := na
@@ -279,26 +324,6 @@ if exit_reason != 0
     entry_bar   := na
     dir         := 0
     exit_reason := 0
-
-// ═══════════════════════════════════════════════════
-// STATS ACCUMULATION
-// ═══════════════════════════════════════════════════
-var int   total_trades = 0
-var int   wins         = 0
-var float total_pips   = 0.0
-var float max_pips     = na
-var float min_pips     = na
-
-if exit_reason != 0
-    total_trades += 1
-    if result_pips > 0
-        wins += 1
-    total_pips += result_pips
-    max_pips := na(max_pips) ? result_pips : math.max(max_pips, result_pips)
-    min_pips := na(min_pips) ? result_pips : math.min(min_pips, result_pips)
-
-float win_rate = total_trades > 0 ? wins / total_trades * 100 : 0.0
-float avg_pips = total_trades > 0 ? total_pips / total_trades : 0.0
 
 // ═══════════════════════════════════════════════════
 // VISUAL MARKERS
@@ -317,7 +342,7 @@ plotchar(exit_reason == 4, title="EXIT TMO", char="●", color=color.gray,   loc
 // ═══════════════════════════════════════════════════
 // STATS TABLE
 // ═══════════════════════════════════════════════════
-var table stats_tbl = table.new(position.bottom_right, 3, 10,
+var table stats_tbl = table.new(position.bottom_right, 3, 16,
      bgcolor=color.new(color.black, 20),
      border_color=color.new(color.gray, 50), border_width=1)
 
@@ -372,3 +397,30 @@ if barstate.islast
     table.cell(stats_tbl, 0, 9, "TOTAL PIPS", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
     table.cell(stats_tbl, 1, 9, str.tostring(total_pips, "+#.##;-#.##"), text_color=total_pips >= 0 ? color.green : color.red, text_size=size.large)
     table.cell(stats_tbl, 2, 9, "", bgcolor=color.new(color.black, 20))
+
+    // Row 10: funnel headers — cuántas veces se alcanzó cada fase en TODO el histórico cargado
+    table.cell(stats_tbl, 0, 10, "C3 #",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 10, "H1 #",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 10, "OB #",  text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    // Row 11: funnel values
+    table.cell(stats_tbl, 0, 11, str.tostring(c3_count), text_color=color.white, text_size=size.normal)
+    table.cell(stats_tbl, 1, 11, str.tostring(h1_count), text_color=color.white, text_size=size.normal)
+    table.cell(stats_tbl, 2, 11, str.tostring(ob_count), text_color=color.white, text_size=size.normal)
+
+    // Row 12: debug — último trade cerrado, valores crudos
+    table.cell(stats_tbl, 0, 12, "ENTRY", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 12, "SL", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 12, "GAP", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    table.cell(stats_tbl, 0, 13, na(dbg_entry) ? "—" : str.tostring(dbg_entry, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(stats_tbl, 1, 13, na(dbg_sl) ? "—" : str.tostring(dbg_sl, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(stats_tbl, 2, 13, na(dbg_raw_sl_gap) ? "—" : str.tostring(dbg_raw_sl_gap, "#.####"), text_color=color.orange, text_size=size.small)
+
+    table.cell(stats_tbl, 0, 14, "TP1/TP2", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 1, 14, "PIPSIZE", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+    table.cell(stats_tbl, 2, 14, "DIR/EXIT", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 40))
+
+    table.cell(stats_tbl, 0, 15, (na(dbg_tp1) ? "—" : str.tostring(dbg_tp1, "#.##")) + "/" + (na(dbg_tp2) ? "—" : str.tostring(dbg_tp2, "#.##")), text_color=color.white, text_size=size.small)
+    table.cell(stats_tbl, 1, 15, str.tostring(pip_size, "#.######"), text_color=color.white, text_size=size.small)
+    table.cell(stats_tbl, 2, 15, str.tostring(dbg_dir) + "/" + str.tostring(dbg_exit_reason), text_color=color.white, text_size=size.small)
