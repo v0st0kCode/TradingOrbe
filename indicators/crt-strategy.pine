@@ -1,0 +1,283 @@
+//@version=5
+strategy("CRT Multi-TF Strategy", overlay=true, max_bars_back=500,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+     commission_type=strategy.commission.percent, commission_value=0.0,
+     process_orders_on_close=false, calc_on_every_tick=false,
+     pyramiding=0)
+
+// ═══════════════════════════════════════════════════
+// Mismo motor de detección que crt-ob-backtest.pine (H4 mitigado +
+// H1 mitigado en la misma dirección + entrada en OB M15). La
+// diferencia: ejecución vía strategy.entry/strategy.exit nativos de
+// TradingView en vez de un motor de backtest hecho a mano — evita
+// los bugs de sincronización entre indicador y stats/dibujo que
+// bloquearon la validación visual (29 jul 2026).
+// ═══════════════════════════════════════════════════
+
+c3_window      = input.int(10, "C3 confirm window (H4 bars)", minval=1, maxval=50)
+setup_max_bars = input.int(4, "Setup persistence (H4 bars) — cuántas velas H4 esperamos a que H1 confirme antes de descartar el rango", minval=1, maxval=200)
+use_daily_bias = input.bool(false, "Require Daily Bias")
+early_entry    = input.bool(true, "Early entry (Turtle Soup, justo tras el barrido H1) — si false, usa Continuation (OB M15)")
+use_eod_close  = input.bool(true, "Forzar cierre EOD (si false, el trade aguanta entre días hasta TP/SL)")
+eod_close_hour = input.int(21, "EOD close hour (hora del exchange, 0-23)", minval=0, maxval=23)
+
+// SESIONES — filtro de operativa por sesión (hora del exchange, 0-23)
+// Desactivadas por defecto: la config candidata (29 jul 2026) se
+// validó sin filtro de sesión — actívalas solo como variable nueva a
+// probar por separado, no mezclado con la vuelta a la config base.
+trade_london   = input.bool(false, "Operar sesión Londres",  group="Sesiones")
+london_start   = input.int(7,  "Londres — hora inicio", minval=0, maxval=23, group="Sesiones")
+london_end     = input.int(16, "Londres — hora fin",    minval=0, maxval=23, group="Sesiones")
+trade_ny       = input.bool(false, "Operar sesión NY",       group="Sesiones")
+ny_start       = input.int(13, "NY — hora inicio", minval=0, maxval=23, group="Sesiones")
+ny_end         = input.int(22, "NY — hora fin",    minval=0, maxval=23, group="Sesiones")
+
+pip_size       = syminfo.mintick * 10
+
+// DAILY BIAS
+d_prev_high = request.security(syminfo.tickerid, "D", high,  lookahead=barmerge.lookahead_off)
+d_prev_low  = request.security(syminfo.tickerid, "D", low,   lookahead=barmerge.lookahead_off)
+
+var float d_today_high = na
+var float d_today_low  = na
+bool new_day = ta.change(time("D")) != 0
+if new_day
+    d_today_high := high
+    d_today_low  := low
+else
+    d_today_high := math.max(nz(d_today_high), high)
+    d_today_low  := math.min(nz(d_today_low),  low)
+
+bool daily_bull = d_today_low  <= d_prev_low  and close > d_prev_low
+bool daily_bear = d_today_high >= d_prev_high and close < d_prev_high
+
+// H4 STATE MACHINE
+h4_time  = request.security(syminfo.tickerid, "240", time,  lookahead=barmerge.lookahead_off)
+h4_high  = request.security(syminfo.tickerid, "240", high,  lookahead=barmerge.lookahead_off)
+h4_low   = request.security(syminfo.tickerid, "240", low,   lookahead=barmerge.lookahead_off)
+h4_close = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+
+bool new_h4 = ta.change(h4_time) != 0
+
+var int   h4_state     = 0
+var float c1_high      = na
+var float c1_low       = na
+var float c2_high      = na
+var float c2_low       = na
+var int   h4_direction = 0
+var float c2_wick_ext  = na
+var float dol_level    = na
+var int   c2_age       = 0
+var int   setup_age    = 0
+
+if new_h4
+    float jc_high  = h4_high
+    float jc_low   = h4_low
+    float jc_close = h4_close
+
+    if h4_state == 0
+        c1_high  := jc_high
+        c1_low   := jc_low
+        h4_state := 1
+
+    else if h4_state == 1
+        bool bull_c2 = jc_low  < c1_low  and jc_close > c1_low  and (not use_daily_bias or daily_bull)
+        bool bear_c2 = jc_high > c1_high and jc_close < c1_high and (not use_daily_bias or daily_bear)
+
+        if bull_c2
+            h4_direction := 1
+            c2_high      := jc_high
+            c2_low       := jc_low
+            c2_wick_ext  := jc_low
+            dol_level    := c1_high
+            c2_age       := 0
+            h4_state     := 2
+        else if bear_c2
+            h4_direction := -1
+            c2_high      := jc_high
+            c2_low       := jc_low
+            c2_wick_ext  := jc_high
+            dol_level    := c1_low
+            c2_age       := 0
+            h4_state     := 2
+        else
+            c1_high  := jc_high
+            c1_low   := jc_low
+            h4_direction := 0
+
+    else if h4_state == 2
+        c2_age := c2_age + 1
+        bool bull_c3 = h4_direction ==  1 and jc_close > c2_high
+        bool bear_c3 = h4_direction == -1 and jc_close < c2_low
+        bool c2_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
+
+        if bull_c3 or bear_c3
+            h4_state  := 3
+            setup_age := 0
+        else if c2_invalid or c2_age >= c3_window
+            c1_high  := jc_high
+            c1_low   := jc_low
+            h4_direction := 0
+            c2_wick_ext := na
+            dol_level   := na
+            c2_age      := 0
+            h4_state    := 1
+
+    else if h4_state == 3
+        setup_age := setup_age + 1
+        bool setup_invalid = (h4_direction == 1 and jc_close < c2_wick_ext) or (h4_direction == -1 and jc_close > c2_wick_ext)
+        if setup_invalid or setup_age >= setup_max_bars
+            c1_high  := jc_high
+            c1_low   := jc_low
+            h4_direction := 0
+            c2_wick_ext := na
+            dol_level   := na
+            setup_age   := 0
+            h4_state    := 1
+
+// H4 mitigado = C2 formado, esté o no confirmado por C3.
+bool h4_mitigated = h4_state == 2 or h4_state == 3
+
+// H1 TURTLE SOUP simplificado — Turtle Soup H1 autocontenido (barre
+// el extremo de la vela H1 anterior y cierra dentro), sin anclarse a
+// la vela de contacto exacta con C1.
+h1_time  = request.security(syminfo.tickerid, "60", time,  lookahead=barmerge.lookahead_off)
+h1_high  = request.security(syminfo.tickerid, "60", high,  lookahead=barmerge.lookahead_off)
+h1_low   = request.security(syminfo.tickerid, "60", low,   lookahead=barmerge.lookahead_off)
+h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+
+bool new_h1 = ta.change(h1_time) != 0
+
+var bool  h1_confirmed     = false
+var float h1_prev_high     = na
+var float h1_prev_low      = na
+var bool  h1_just_confirmed = false
+var float h1_sweep_low     = na
+var float h1_sweep_high    = na
+
+h1_just_confirmed := false
+
+if new_h1
+    float jc_h = h1_high
+    float jc_l = h1_low
+    float jc_c = h1_close
+
+    if not h4_mitigated
+        h1_confirmed := false
+
+    if h4_mitigated and not na(h1_prev_high) and not na(h1_prev_low)
+        bool h1_bull_ts = h4_direction == 1  and jc_l < h1_prev_low  and jc_c > h1_prev_low  and jc_c < h1_prev_high
+        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low
+
+        if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
+            h1_confirmed      := true
+            h1_just_confirmed := true
+            h1_sweep_low      := jc_l
+            h1_sweep_high     := jc_h
+
+    h1_prev_high := jc_h
+    h1_prev_low  := jc_l
+
+bool full_setup = h4_mitigated and h1_confirmed
+
+// M15 ORDER BLOCK
+[m15_open, m15_close, m15_open_1, m15_close_1] = request.security(syminfo.tickerid, "15",
+     [open, close, open[1], close[1]], lookahead=barmerge.lookahead_off)
+
+bool m15_bull = m15_close > m15_open
+bool m15_bear = m15_close < m15_open
+bool m15_prev_bull = m15_close_1 > m15_open_1
+bool m15_prev_bear = m15_close_1 < m15_open_1
+
+bool bull_engulf = m15_bull and m15_prev_bear and m15_open <= m15_close_1 and m15_close >= m15_open_1
+bool bear_engulf = m15_bear and m15_prev_bull and m15_open >= m15_close_1 and m15_close <= m15_open_1
+
+// Continuation: espera C3 + pullback OB M15.
+bool signal_long_cont  = full_setup and h4_direction == 1  and bull_engulf and not na(c2_wick_ext) and not na(dol_level)
+bool signal_short_cont = full_setup and h4_direction == -1 and bear_engulf and not na(c2_wick_ext) and not na(dol_level)
+
+// Early (Turtle Soup): entra en cuanto H1 confirma el barrido, sin
+// esperar C3 ni pullback M15 — la entrada "más agresiva y temprana"
+// según la metodología CRT.
+bool signal_long_early  = h4_mitigated and h1_just_confirmed and h4_direction == 1  and not na(dol_level)
+bool signal_short_early = h4_mitigated and h1_just_confirmed and h4_direction == -1 and not na(dol_level)
+
+// Filtro de sesión — hora del exchange. Londres y NY se evalúan
+// independientemente (cada una con su propio rango horario), un
+// trade es válido si cae dentro de cualquiera de las activadas.
+bool in_london = trade_london and hour(time) >= london_start and hour(time) < london_end
+bool in_ny     = trade_ny     and hour(time) >= ny_start     and hour(time) < ny_end
+// Si ninguna sesión está activada, no se aplica filtro (todas las horas válidas).
+bool in_session = (not trade_london and not trade_ny) or in_london or in_ny
+
+bool signal_long  = (early_entry ? signal_long_early  : signal_long_cont)  and in_session
+bool signal_short = (early_entry ? signal_short_early : signal_short_cont) and in_session
+
+// ═══════════════════════════════════════════════════
+// EJECUCIÓN — strategy.entry/strategy.exit nativos
+// Modelo corregido (29 jul 2026, indicación directa del usuario):
+//   - M15 solo afina el MOMENTO de entrada (el OB/pulso H1), no la
+//     referencia de niveles.
+//   - SL: mecha de la vela H4 (C2) que mitigó el rango — nunca H1, ni
+//     un mínimo en pips fijo.
+//   - TP final: 90% del rango H4 que se busca mitigar (no el 100%
+//     exacto del extremo opuesto — deja margen antes de tocar el
+//     extremo exacto). TP1 = 50% del camino hasta ese TP final.
+// Sin timeout por velas — el único cierre forzado es EOD.
+// ═══════════════════════════════════════════════════
+use_min_rr    = input.bool(false, "Aplicar filtro RR mínimo (descarta el trade si no llega)")
+min_rr        = input.float(2.5, "RR mínimo para entrar (objetivo final / riesgo)", minval=0.1, step=0.1)
+tp_pct_range  = input.float(0.9, "TP final — % del rango H4 a mitigar", minval=0.1, maxval=1.0, step=0.05)
+extend_to_rr  = input.bool(false, "Extender objetivo si el rango no da RR mínimo (en vez de descartar el trade)")
+target_min_rr = input.float(2.0, "RR mínimo garantizado al extender", minval=0.1, step=0.1)
+
+float h4_range = c1_high - c1_low
+
+// Cuando la entrada llega tarde (H1 confirma cerca del extremo del
+// rango H4), el objetivo basado en % del rango puede quedar muy cerca
+// del precio — RR pobre o negativo. En vez de descartar el trade,
+// extendemos el objetivo más allá del rango para garantizar
+// target_min_rr, igual que haríamos manualmente al ver un setup así.
+if signal_long and strategy.position_size == 0
+    float sl = c2_wick_ext - 3 * pip_size
+    float risk = close - sl
+    float tp_range = c1_low + h4_range * tp_pct_range
+    float reward_range = tp_range - close
+    float reward_min = risk * target_min_rr
+    float reward_full = extend_to_rr and risk > 0 and reward_range < reward_min ? reward_min : reward_range
+    float tp_final = close + reward_full
+    float rr = risk > 0 ? reward_full / risk : na
+    if not na(rr) and (not use_min_rr or rr >= min_rr)
+        float tp1 = close + reward_full * 0.5
+        strategy.entry("Long", strategy.long)
+        strategy.exit("TP1 Long", "Long", stop=sl, limit=tp1, qty_percent=50)
+        strategy.exit("TP2 Long", "Long", stop=sl, limit=tp_final, qty_percent=100)
+
+if signal_short and strategy.position_size == 0
+    float sl = c2_wick_ext + 3 * pip_size
+    float risk = sl - close
+    float tp_range = c1_high - h4_range * tp_pct_range
+    float reward_range = close - tp_range
+    float reward_min = risk * target_min_rr
+    float reward_full = extend_to_rr and risk > 0 and reward_range < reward_min ? reward_min : reward_range
+    float tp_final = close - reward_full
+    float rr = risk > 0 ? reward_full / risk : na
+    if not na(rr) and (not use_min_rr or rr >= min_rr)
+        float tp1 = close - reward_full * 0.5
+        strategy.entry("Short", strategy.short)
+        strategy.exit("TP1 Short", "Short", stop=sl, limit=tp1, qty_percent=50)
+        strategy.exit("TP2 Short", "Short", stop=sl, limit=tp_final, qty_percent=100)
+
+// EOD close: opcional (use_eod_close). Desactivado por defecto — el
+// trade aguanta entre días hasta que toque TP1/TP2/SL, sin cierre
+// forzado por tiempo.
+bool eod_now = hour(time) == eod_close_hour and hour(time[1]) != eod_close_hour
+if use_eod_close and strategy.position_size != 0 and eod_now
+    strategy.close_all(comment="EOD")
+
+// ═══════════════════════════════════════════════════
+// VISUALES — solo señales, el resto (entradas/SL/TP/lista de trades)
+// lo dibuja el propio Strategy Tester de TradingView.
+// ═══════════════════════════════════════════════════
+plotshape(signal_long,  title="Signal Long",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.tiny)
+plotshape(signal_short, title="Signal Short", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.tiny)

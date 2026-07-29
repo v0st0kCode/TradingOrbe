@@ -1,5 +1,5 @@
 //@version=5
-indicator("CRT Unified", overlay=true, max_bars_back=500)
+indicator("CRT Unified", overlay=true, max_bars_back=500, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
 
 // INPUTS
 bull_color     = input.color(color.rgb(0, 193, 118),    "Bullish Color",       group="Colors")
@@ -30,6 +30,7 @@ var float c1_low          = na
 var int   c1_bar          = na
 var float c2_high         = na
 var float c2_low          = na
+var float c2_close        = na
 var int   h4_direction    = 0
 var float c2_wick_ext     = na
 var float dol_level       = na
@@ -115,6 +116,7 @@ if new_h4_bar
             c2_high      := jc_high
             c2_low       := jc_low
             c2_wick_ext  := jc_low
+            c2_close     := jc_close
             dol_level    := c1_high
             c2_age       := 0
             h4_state     := 2
@@ -123,6 +125,7 @@ if new_h4_bar
             c2_high      := jc_high
             c2_low       := jc_low
             c2_wick_ext  := jc_high
+            c2_close     := jc_close
             dol_level    := c1_low
             c2_age       := 0
             h4_state     := 2
@@ -206,7 +209,11 @@ if dol_mitigated
     ob_alerted   := false
     drawn_ob_bar := na
 
-bool h4_setup_active = h4_state == 3
+// H4 mitigado = C2 formado, esté o no confirmado por C3. Ya no exigimos
+// C3 (displacement) para operar — el gate es multi-TF (H4+H1), no de
+// continuación (29 jul 2026, indicación del usuario). El nombre de la
+// variable se conserva por los usos existentes en labels/alertas.
+bool h4_setup_active = h4_state == 2 or h4_state == 3
 
 // H1 DATA
 h1_time  = request.security(syminfo.tickerid, "60", time,  lookahead=barmerge.lookahead_off)
@@ -215,15 +222,12 @@ h1_low   = request.security(syminfo.tickerid, "60", low,   lookahead=barmerge.lo
 h1_close = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
 bool new_h1_bar = ta.change(h1_time) != 0
 
-// H1 TURTLE SOUP
-// Protocolo real (fuente: notebook CRT metodología):
-// 1. Mientras se forma C2 (h4_state==2), localizar la vela H1 concreta que
-//    perfora el nivel de C1 — esa vela pasa a ser la referencia LTF C1.
-// 2. La confirmación es que una vela H1 posterior barra el extremo de ESA
-//    vela de contacto y cierre de vuelta dentro de su rango.
-// (Antes: barría la vela H1 anterior genérica + exigía quedar dentro del
-// rango C1 completo, que ya está desactualizado en cuanto arranca C2 —
-// por eso nunca confirmaba.)
+// H1 TURTLE SOUP (versión simplificada, 29 jul 2026)
+// Ya no se ancla a la vela H1 concreta que tocó C1. Basta con un Turtle
+// Soup H1 autocontenido: la vela H1 actual barre el extremo de la H1
+// ANTERIOR y cierra de vuelta dentro, en la misma dirección que la
+// mitigación H4. contact_c1_bar/ltf_c1_high/ltf_c1_low/contact_found
+// quedan sin uso (se conservan declarados, sin efecto).
 if new_h1_bar
     float jc_h   = h1_high
     float jc_l   = h1_low
@@ -234,29 +238,17 @@ if new_h1_bar
         h1_ts_prev_low  := na
         h1_ts_bar       := na
         h1_ts_time      := na
-    if contact_c1_bar != c1_bar
-        contact_found  := false
-        ltf_c1_high    := na
-        ltf_c1_low     := na
-        contact_c1_bar := c1_bar
-    if h4_state == 2 and not contact_found
-        bool pierces_low  = h4_direction == 1  and jc_l < c1_low
-        bool pierces_high = h4_direction == -1 and jc_h > c1_high
-        if pierces_low or pierces_high
-            ltf_c1_high   := jc_h
-            ltf_c1_low    := jc_l
-            contact_found := true
-    if h4_setup_active and contact_found and not na(ltf_c1_high) and not na(ltf_c1_low)
-        bool h1_bull_ts = h4_direction == 1  and jc_l < ltf_c1_low  and jc_c > ltf_c1_low  and jc_c < ltf_c1_high
-        bool h1_bear_ts = h4_direction == -1 and jc_h > ltf_c1_high and jc_c < ltf_c1_high and jc_c > ltf_c1_low
+    if h4_setup_active and not na(h1_prev_high) and not na(h1_prev_low)
+        bool h1_bull_ts = h4_direction == 1  and jc_l < h1_prev_low  and jc_c > h1_prev_low  and jc_c < h1_prev_high
+        bool h1_bear_ts = h4_direction == -1 and jc_h > h1_prev_high and jc_c < h1_prev_high and jc_c > h1_prev_low
         if (h1_bull_ts or h1_bear_ts) and not h1_confirmed
             h1_confirmed    := true
-            h1_ts_prev_high := ltf_c1_high
-            h1_ts_prev_low  := ltf_c1_low
+            h1_ts_prev_high := h1_prev_high
+            h1_ts_prev_low  := h1_prev_low
             h1_ts_bar       := bar_index
             h1_ts_time      := int(h1_time)
-    h1_prev_high := h1_high
-    h1_prev_low  := h1_low
+    h1_prev_high := jc_h
+    h1_prev_low  := jc_l
 
 bool full_setup = h4_setup_active and h1_confirmed
 
@@ -308,18 +300,29 @@ float tp1_price   = na
 float tp2_price   = na
 float rr_ratio    = na
 
-if ob_detected and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+// Modelo de mitigación multi-TF (29 jul 2026, sobre indicación del
+// usuario — reemplaza el modelo de continuación). SL: mecha del H4
+// mitigado (C2). TP: RR fijo 1:1 (TP1) / 1:1.5 (TP2), capado por
+// dol_level (extremo opuesto del rango H4, "por mitigar") si ese
+// nivel queda más cerca que el 1.5R.
+if ob_detected and not na(c2_wick_ext) and not na(dol_level)
     if h4_direction == 1
         entry_price := ob_high
         sl_price    := c2_wick_ext - 3 * pip_size
-        tp1_price   := c1_low + (c1_high - c1_low) * 0.5
-        tp2_price   := dol_level
+        float risk_l = entry_price - sl_price
+        float tp1_rr = entry_price + risk_l * 1.0
+        float tp2_rr = entry_price + risk_l * 1.5
+        tp1_price   := tp1_rr
+        tp2_price   := (dol_level > entry_price and dol_level < tp2_rr) ? dol_level : tp2_rr
         rr_ratio    := (tp2_price - entry_price) / (entry_price - sl_price)
     else
         entry_price := ob_low
         sl_price    := c2_wick_ext + 3 * pip_size
-        tp1_price   := c1_high - (c1_high - c1_low) * 0.5
-        tp2_price   := dol_level
+        float risk_s = sl_price - entry_price
+        float tp1_rr = entry_price - risk_s * 1.0
+        float tp2_rr = entry_price - risk_s * 1.5
+        tp1_price   := tp1_rr
+        tp2_price   := (dol_level < entry_price and dol_level > tp2_rr) ? dol_level : tp2_rr
         rr_ratio    := (entry_price - tp2_price) / (sl_price - entry_price)
 
 // BACKTEST ENGINE
@@ -327,19 +330,25 @@ bool bt_in_position = not na(bt_entry_price)
 bool bt_trigger_long  = full_setup and h4_direction == 1 and bull_engulf
 bool bt_trigger_short = full_setup and h4_direction == -1 and bear_engulf
 
-if bt_trigger_long and not bt_in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+if bt_trigger_long and not bt_in_position and not na(c2_wick_ext) and not na(dol_level)
     bt_entry_price := open
     bt_sl_price    := c2_wick_ext - 3 * pip_size
-    bt_tp1_price   := c1_low + (c1_high - c1_low) * 0.5
-    bt_tp2_price   := dol_level
+    float bt_risk_l = bt_entry_price - bt_sl_price
+    float bt_tp1_rr = bt_entry_price + bt_risk_l * 1.0
+    float bt_tp2_rr = bt_entry_price + bt_risk_l * 1.5
+    bt_tp1_price   := bt_tp1_rr
+    bt_tp2_price   := (dol_level > bt_entry_price and dol_level < bt_tp2_rr) ? dol_level : bt_tp2_rr
     bt_entry_bar   := bar_index + 1
     bt_dir         := 1
 
-if bt_trigger_short and not bt_in_position and not na(c2_wick_ext) and not na(c1_high) and not na(c1_low)
+if bt_trigger_short and not bt_in_position and not na(c2_wick_ext) and not na(dol_level)
     bt_entry_price := open
     bt_sl_price    := c2_wick_ext + 3 * pip_size
-    bt_tp1_price   := c1_high - (c1_high - c1_low) * 0.5
-    bt_tp2_price   := dol_level
+    float bt_risk_s = bt_sl_price - bt_entry_price
+    float bt_tp1_rr = bt_entry_price - bt_risk_s * 1.0
+    float bt_tp2_rr = bt_entry_price - bt_risk_s * 1.5
+    bt_tp1_price   := bt_tp1_rr
+    bt_tp2_price   := (dol_level < bt_entry_price and dol_level > bt_tp2_rr) ? dol_level : bt_tp2_rr
     bt_entry_bar   := bar_index + 1
     bt_dir         := -1
 
@@ -381,6 +390,20 @@ if bt_exit_reason != 0
     bt_total_pips += bt_result_pips
     bt_max_pips := na(bt_max_pips) ? bt_result_pips : math.max(bt_max_pips, bt_result_pips)
     bt_min_pips := na(bt_min_pips) ? bt_result_pips : math.min(bt_min_pips, bt_result_pips)
+
+    // Dibujo persistente del trade (29 jul 2026) — auditoría visual
+    // trade a trade: entrada, SL, TP1, TP2 y etiqueta de resultado.
+    color bt_trade_col = bt_exit_reason == 3 ? color.red : bt_exit_reason == 4 ? color.gray : bull_color
+    line.new(bt_entry_bar, bt_entry_price, bar_index, bt_entry_price, color=color.new(color.white, 30), width=1, xloc=xloc.bar_index)
+    line.new(bt_entry_bar, bt_sl_price,    bar_index, bt_sl_price,    color=color.new(color.red, 20),   width=1, xloc=xloc.bar_index, style=line.style_dashed)
+    line.new(bt_entry_bar, bt_tp1_price,   bar_index, bt_tp1_price,   color=color.new(color.orange, 20),width=1, xloc=xloc.bar_index, style=line.style_dashed)
+    line.new(bt_entry_bar, bt_tp2_price,   bar_index, bt_tp2_price,   color=color.new(color.blue, 20),  width=1, xloc=xloc.bar_index, style=line.style_dashed)
+    box.new(bt_entry_bar, bt_dir == 1 ? bt_entry_price : bt_sl_price, bar_index, bt_dir == 1 ? bt_sl_price : bt_entry_price, border_color=na, bgcolor=color.new(color.red, 88))
+    box.new(bt_entry_bar, bt_dir == 1 ? bt_tp1_price : bt_entry_price, bar_index, bt_dir == 1 ? bt_entry_price : bt_tp1_price, border_color=na, bgcolor=color.new(bull_color, 90))
+    label.new(bar_index, bt_dir == 1 ? bt_tp2_price : bt_sl_price,
+         (bt_exit_reason == 3 ? "SL" : bt_exit_reason == 4 ? "T/O" : bt_exit_reason == 2 ? "TP1" : "TP2") + " " + str.tostring(bt_result_pips, "+#.#;-#.#"),
+         color=color.new(bt_trade_col, 70), textcolor=bt_trade_col, style=bt_dir == 1 ? label.style_label_down : label.style_label_up, size=size.tiny)
+
     bt_entry_price := na
     bt_sl_price    := na
     bt_tp1_price   := na
