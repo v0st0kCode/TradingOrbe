@@ -136,7 +136,7 @@ try {
   const hm = d => d.toLocaleTimeString('es-ES', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   const now = new Date();
   const today = day(now), tomorrow = day(new Date(now.getTime() + 864e5));
-  const lvl = { High: 'alto', Medium: 'medio', Low: 'bajo' };
+  const lvl = { High: 'alto', Medium: 'medio' };
   const all = raw
     .filter(x => ['USD', 'EUR'].includes(x.country) && lvl[x.impact])
     .map(x => { const d = new Date(x.date); return { ts: d.getTime(), day: day(d), time: hm(d), cur: x.country,
@@ -144,7 +144,7 @@ try {
   // hoy: todo USD (cualquier impacto) y EUR medio/alto; mañana: solo impacto alto
   const ev = all.filter(e => e.day === today ? (e.cur === 'USD' || e.impact !== 'bajo') : (e.day === tomorrow && e.impact === 'alto'));
   const rank = e => ({ alto: 0, medio: 1, bajo: 2 })[e.impact];
-  const todayEv = ev.filter(e => e.day === today).sort((a, b) => rank(a) - rank(b) || a.ts - b.ts).slice(0, 16);
+  const todayEv = ev.filter(e => e.day === today).sort((a, b) => rank(a) - rank(b) || a.ts - b.ts).slice(0, 8);
   const tomEv = ev.filter(e => e.day === tomorrow).sort((a, b) => a.ts - b.ts).slice(0, 3);
   [...todayEv, ...tomEv].sort((a, b) => a.ts - b.ts).forEach((e, i) => calendar.push({
     id: i + 1, when: e.day === today ? 'hoy' : 'mañana', published: e.ts < now.getTime(),
@@ -187,15 +187,14 @@ const sys = 'Eres analista macro para un trader retail de EURUSD y XAUUSD (opera
   '4) Pondera sobre todo: señales de Fed/BCE (tipos, discursos), yields de EE.UU., petróleo/Irán-Ormuz, DXY y oro tal como los describe el briefing. Un movimiento pequeño del DXY no basta para un sesgo. ' +
   '5) "eventos": rellénalo siempre que el briefing liste datos u oradores; SOLO los de la línea "Looking ahead"/"Speakers" del briefing y de la semana; NO inventes horas ni uses la hora de publicación de un titular como hora del evento; si no consta hora, no la pongas. ' +
   '6) Responde en español, conciso. ' +
-  '8) "calendario": una entrada {"id","sube","escenarios","publicado"} por cada evento del CALENDARIO, con su mismo id. ' +
-  '"sube" = efecto sobre el USD si el dato supera la previsión: "+" (USD sube), "-" (USD baja) o "0" (sin dirección, p. ej. oradores sin cifra). Pautas: inflación (IPC, PCE, deflactor y índices de precios del PIB), empleo, PIB, gasto/ingresos y PMI de EE.UU. superiores a la previsión suelen fortalecer al USD (sube "+"; los precios altos elevan las expectativas de tipos de la Fed); paro, peticiones de subsidio, déficit comercial mayor o inventarios de crudo mayores suelen debilitarlo ("-"); datos de la eurozona fuertes debilitan al USD ("-") y flojos lo fortalecen. ' +
-  '"escenarios" = 1-2 frases con el efecto si supera y si decepciona, teniendo en cuenta el contexto del briefing (expectativas de Fed/BCE), SOLO para eventos de impacto alto o medio; vacío para los de impacto bajo. No pronostiques la cifra. ' +
-  '"publicado" (solo eventos YA PUBLICADOS) = resultado frente a previsión y su efecto en el USD SOLO si consta en los titulares o el briefing; si no consta, "no consta en los titulares". Vacío en pendientes. ' +
-  'Los de impacto bajo salen junto a otros: trátalos como parte del mismo bloque de datos. Si hay eventos de impacto alto en USD, menciónalos en riesgos (volatilidad a esa hora). ' +
-  '7) Si hay DATOS DE MERCADO, úsalos como hechos: relaciona DXY, yields y VIX con el sesgo. Menciona el RSI solo si está en sobrecompra (>70), sobreventa (<30) o contradice claramente el sesgo; un RSI extremo en la dirección del sesgo es riesgo de agotamiento o rebote (ponlo en riesgos), no confirmación. No inventes otros niveles. ' +
+  '8) "calendario": una entrada {"id","sube","nota","publicado"} por cada evento del CALENDARIO, con su mismo id. "sube" = efecto sobre el USD si el dato supera la previsión: "+" (USD sube) o "-" (USD baja); "0" SOLO si el evento no tiene previsión (p. ej. un orador). Nunca pongas "0" en un evento con previsión. ' +
+  'Pautas: inflación (IPC, PCE, deflactor y índices de precios), empleo, PIB, gasto y PMI de EE.UU. superiores a la previsión suelen fortalecer al USD ("+"; los precios altos elevan las expectativas de tipos de la Fed); paro, peticiones de subsidio o déficit comercial mayor suelen debilitarlo ("-"); datos de la eurozona fuertes debilitan al USD ("-") y flojos lo fortalecen. ' +
+  '"nota" = máximo 10 palabras SOLO si aportan contexto concreto del briefing (p. ej. qué descuenta el mercado de la Fed/BCE); prohibido describir qué es el dato; si no hay contexto, cadena vacía. "publicado" (solo eventos YA PUBLICADOS) = resultado frente a previsión y efecto en el USD en máximo 12 palabras, SOLO si consta en los titulares o el briefing; si no consta, "sin dato en titulares". Vacío en pendientes. No pronostiques la cifra. ' +
+  'Si hay eventos de impacto alto en USD, menciónalos en riesgos. ' +
+  '9) Sé MUY conciso: "resumen" máximo 2 frases; "drivers" máximo 3 puntos de menos de 12 palabras; "riesgos" máximo 2 puntos breves; "eurusd" y "xauusd" una frase de menos de 20 palabras cada una; "cambios" una frase. ' +
   'Devuelve SOLO JSON con esta forma: {"sesgo_usd":"alcista|bajista|neutral|mixto","confianza":"baja|media|alta",' +
-  '"resumen":"2-3 frases","drivers":["3-5 puntos"],"eventos":["evento con hora UTC si consta"],' +
-  '"eurusd":"1-2 frases","xauusd":"1-2 frases","riesgos":["1-3 puntos"],"calendario":[{"id":1,"sube":"+","escenarios":"","publicado":""}],"cambios":"solo si hay informe previo: qué cambió desde Londres; si no, cadena vacía"}.';
+  '"resumen":"2 frases","drivers":["máx 3 puntos"],"eventos":["evento con hora UTC si consta"],' +
+  '"eurusd":"1 frase","xauusd":"1 frase","riesgos":["máx 2 puntos"],"calendario":[{"id":1,"sube":"+","nota":"","publicado":""}],"cambios":"solo si hay informe previo: qué cambió desde Londres; si no, cadena vacía"}.';
 const user = 'SESIÓN: ' + (session === 'ny' ? 'pre-Nueva York' : 'apertura Londres') + '\n' +
   'BRIEFING NEWSQUAWK (publicado ' + pub + '):\n' + excerpt + '\n\n' +
   'CALENDARIO ECONÓMICO (Forex Factory, hora de España):\n' + (ctxt || 'no disponible') + '\n\n' +
@@ -225,32 +224,40 @@ const market = $('Market data').first().json.market || [];
 const fv = m => m.name === 'US10Y' ? m.last.toFixed(2) + '% (' + (m.d1bps >= 0 ? '+' : '') + m.d1bps.toFixed(0) + 'pb)'
   : m.last.toFixed(m.name === 'EURUSD' ? 4 : m.name === 'XAUUSD' ? 0 : 2) + ' (' + (m.d1 >= 0 ? '+' : '') + m.d1.toFixed(2) + '%)';
 const rs = m => m.rsi == null ? 'n/d' : Math.round(m.rsi);
-const mTg = !market.length ? '<i>Datos de mercado no disponibles esta vez (Yahoo)</i>\n\n' : market.length ? '<b>Mercado</b> (RSI14 diario)\n' + market.map(m => esc(m.name) + ' ' + esc(fv(m)) + ' · RSI ' + rs(m)).join('\n') + '\n\n' : '';
+const short = m => esc(m.name) + ' ' + esc(fv(m)) + ' RSI ' + rs(m);
+const mTg = !market.length ? '<i>Mercado no disponible</i>\n\n' : '<b>Mercado</b>\n' + market.slice(0, 3).map(short).join(' · ') + '\n' + market.slice(3).map(short).join(' · ') + '\n\n';
 const mHtml = !market.length ? '<p style="color:#b45309">Datos de mercado no disponibles esta vez (Yahoo).</p>' : market.length ? '<h3>Mercado</h3><table style="border-collapse:collapse;font-size:14px"><tr style="color:#666;text-align:left"><th style="padding:2px 12px 2px 0">Activo</th><th style="padding:2px 12px 2px 0">Último (1d)</th><th style="padding:2px 12px 2px 0">5d</th><th style="padding:2px 12px 2px 0">RSI14</th><th>vs SMA20</th></tr>' +
   market.map(m => '<tr><td style="padding:2px 12px 2px 0"><b>' + esc(m.name) + '</b></td><td style="padding:2px 12px 2px 0">' + esc(fv(m)) + '</td><td style="padding:2px 12px 2px 0">' +
     (m.name === 'US10Y' ? (m.d5bps >= 0 ? '+' : '') + m.d5bps.toFixed(0) + 'pb' : (m.d5 >= 0 ? '+' : '') + m.d5.toFixed(2) + '%') +
     '</td><td style="padding:2px 12px 2px 0">' + rs(m) + '</td><td>' + m.vsSma + '</td></tr>').join('') + '</table>' : '';
 const calendar = $('Economic calendar').first().json.calendar || [];
 const cmap = new Map((Array.isArray(r.calendario) ? r.calendario : []).map(x => [Number(x.id), x]));
-const rows = calendar.map(e => { const c = cmap.get(e.id) || {}; return { ...e, esc: c.escenarios || '', pub: c.publicado || '', sube: c.sube || '' }; });
-const eff = e => e.pub ? '✓ ' + e.pub : e.esc ? '→ ' + e.esc
-  : e.sube === '+' ? '→ si supera la previsión: USD ▲' : e.sube === '-' ? '→ si supera la previsión: USD ▼' : '';
+const dirOf = e => {
+  if (!e.forecast) return '0';
+  const neg = /unemploy|claims|jobless|trade balance|deficit|inventor/i.test(e.title);
+  const usdUp = neg ? '-' : '+';
+  return e.cur === 'USD' ? usdUp : (usdUp === '+' ? '-' : '+');
+};
+const rows = calendar.map(e => { const c = cmap.get(e.id) || {}; return { ...e, nota: c.nota || '', pub: c.publicado || '', sube: (c.sube === '+' || c.sube === '-') ? c.sube : dirOf(e) }; });
+const eff = e => e.pub ? '✓ ' + e.pub
+  : (e.sube === '+' ? 'si supera: USD ▲' : e.sube === '-' ? 'si supera: USD ▼' : '') + (e.nota ? (e.sube === '+' || e.sube === '-' ? ' · ' : '') + e.nota : '');
 const cut = t => t.length <= 3900 ? t : t.slice(0, t.lastIndexOf('\n', 3900));
 const calTg = rows.length ? '<b>Calendario (hora España)</b>\n' + rows.map(e => e.time + ' ' + e.cur + ' ' + esc(e.title) + ' [' + e.impact + ']' +
-    (e.when === 'mañana' ? ' (mañana)' : '') + (e.forecast ? ' · prevista ' + esc(e.forecast) : '') + (e.previous ? ' · anterior ' + esc(e.previous) : '') +
-    (eff(e) ? '\n   ' + esc(eff(e)) : '')).join('\n') + '\n\n'
-  : '<i>Calendario no disponible esta vez</i>\n\n';
-const calHtml = rows.length ? '<h3>Calendario económico (hora España)</h3><table style="border-collapse:collapse;font-size:14px"><tr style="color:#666;text-align:left"><th style="padding:3px 10px 3px 0">Hora</th><th style="padding:3px 10px 3px 0">Evento</th><th style="padding:3px 10px 3px 0">Impacto</th><th style="padding:3px 10px 3px 0">Prevista</th><th style="padding:3px 10px 3px 0">Anterior</th><th>Efecto en el USD</th></tr>' +
-  rows.map(e => '<tr style="vertical-align:top;border-top:1px solid #eee"><td style="padding:3px 10px 3px 0;white-space:nowrap">' + (e.when === 'mañana' ? 'mañana ' : '') + e.time + '</td><td style="padding:3px 10px 3px 0"><b>' + esc(e.cur) + '</b> ' + esc(e.title) +
-    '</td><td style="padding:3px 10px 3px 0">' + e.impact + '</td><td style="padding:3px 10px 3px 0">' + esc(e.forecast) + '</td><td style="padding:3px 10px 3px 0">' + esc(e.previous) + '</td><td>' + esc(eff(e)) + '</td></tr>').join('') + '</table>'
-  : '<p style="color:#b45309">Calendario no disponible esta vez.</p>';
+    (e.when === 'mañana' ? ' (mañana)' : '') + (e.forecast ? ' · prev ' + esc(e.forecast) : '') + (e.previous ? ' · ant ' + esc(e.previous) : '') +
+    (eff(e) ? ' → ' + esc(eff(e)) : '')).join('\n') + '\n\n'
+  : '<i>Sin datos de impacto medio/alto hoy (o calendario no disponible)</i>\n\n';
+const calHtml = rows.length ? '<h3>Calendario (hora España)</h3><table style="border-collapse:collapse;font-size:14px">' +
+  rows.map(e => '<tr style="vertical-align:top;border-top:1px solid #eee"><td style="padding:3px 10px 3px 0;white-space:nowrap">' + (e.when === 'mañana' ? 'mañana ' : '') + e.time +
+    '</td><td style="padding:3px 10px 3px 0"><b>' + esc(e.cur) + '</b> ' + esc(e.title) + ' [' + e.impact + ']</td><td style="padding:3px 10px 3px 0;white-space:nowrap">' +
+    esc(e.forecast) + (e.previous ? ' (ant ' + esc(e.previous) + ')' : '') + '</td><td>' + esc(eff(e)) + '</td></tr>').join('') + '</table>'
+  : '<p style="color:#666">Sin datos de impacto medio/alto hoy (o calendario no disponible).</p>';
 const bullets = a => arr(a).map(x => '• ' + esc(x)).join('\n');
 
 const tg = '<b>Macro Brief — ' + label + ' · ' + date + '</b>\n' +
   mark + ' USD <b>' + esc(r.sesgo_usd) + '</b> (confianza ' + esc(r.confianza) + ')\n\n' +
   esc(r.resumen) + '\n\n' +
   (r.cambios ? '<b>Cambios desde Londres</b>\n' + esc(r.cambios) + '\n\n' : '') +
-  mTg + '<b>EURUSD</b> ' + esc(r.eurusd) + '\n<b>XAUUSD</b> ' + esc(r.xauusd) + '\n\n' +
+  mTg + calTg + '<b>EURUSD</b> ' + esc(r.eurusd) + '\n<b>XAUUSD</b> ' + esc(r.xauusd) + '\n\n' +
   (!rows.length && arr(r.eventos).length ? '<b>Eventos</b>\n' + bullets(r.eventos) + '\n\n' : '') +
   (arr(r.riesgos).length ? '<b>Riesgos</b>\n' + bullets(r.riesgos) : '');
 
@@ -273,7 +280,7 @@ if (session === 'london') {
   sd.london = { date: $now.setZone('Europe/Madrid').toFormat('yyyy-MM-dd'), report: r };
 }
 const subject = 'Macro Brief ' + label + ' · USD ' + r.sesgo_usd + ' · ' + date;
-return [{ json: { subject, html, tg: cut(tg), tgCal: cut(calTg.trim()) } }];
+return [{ json: { subject, html, tg: cut(tg) } }];
 """
 
 
@@ -342,11 +349,6 @@ def build(chat_id, test_path=None, error_wf=None, fail=False):
          "parameters": {"resource": "message", "operation": "send", "sendTo": EMAIL_TO,
                         "subject": "={{ $json.subject }}", "emailType": "html", "message": "={{ $json.html }}",
                         "options": {"appendAttribution": False}}},
-        {"id": "n15", "name": "Send Telegram calendar", "type": "n8n-nodes-base.telegram", "typeVersion": 1.2,
-         "position": [2900, 100], "credentials": {"telegramApi": CRED_TELEGRAM},
-         "parameters": {"resource": "message", "operation": "sendMessage", "chatId": chat_id,
-                        "text": "={{ $('Format report').first().json.tgCal }}",
-                        "additionalFields": {"parse_mode": "HTML", "appendAttribution": False}}},
         {"id": "n14", "name": "Send Telegram", "type": "n8n-nodes-base.telegram", "typeVersion": 1.2,
          "position": [2660, 100], "credentials": {"telegramApi": CRED_TELEGRAM},
          "parameters": {"resource": "message", "operation": "sendMessage", "chatId": chat_id,
@@ -360,7 +362,6 @@ def build(chat_id, test_path=None, error_wf=None, fail=False):
         conns[a] = {"main": [[{"node": b, "type": "main", "index": 0}]]}
     conns["Format report"] = {"main": [[{"node": "Send email", "type": "main", "index": 0},
                                         {"node": "Send Telegram", "type": "main", "index": 0}]]}
-    conns["Send Telegram"] = {"main": [[{"node": "Send Telegram calendar", "type": "main", "index": 0}]]}
     if test_path:
         nodes.append({"id": "n0", "name": "Test webhook", "type": "n8n-nodes-base.webhook", "typeVersion": 2,
                       "position": [0, 200], "webhookId": secrets.token_hex(8),
