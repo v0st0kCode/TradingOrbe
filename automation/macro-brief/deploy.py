@@ -72,7 +72,7 @@ let t = dec(html.replace(/<(script|style)[\s\S]*?<\/\1>/g, ' ').replace(/<[^>]+>
 const pub = (t.match(/Published:\s*(\d+ \w+ \d{4},? [\d:]+ UTC)/) || [])[1] || 'fecha desconocida';
 const i = t.indexOf('Newsquawk Desk');
 if (i > 0) t = t.slice(i + 14);
-const excerpt = t.slice(0, 9500);
+const excerpt = t.slice(0, 8500);
 
 const sys = 'Eres un filtro de noticias de mercado para un trader de EURUSD y XAUUSD. Recibes titulares numerados. ' +
   'Devuelve SOLO un JSON {"items":[{"i":n,"r":0|1,"u":"bull|bear|neutral","a":"USD|EUR|XAU|OIL|ALL|NONE","w":1|2|3,"t":"tema en 1-3 palabras"}]}, un objeto por titular. ' +
@@ -123,6 +123,36 @@ for (const [name, sym] of syms) {
 return [{ json: { ...prev, market } }];
 """
 
+JS_CALENDAR = r"""
+const prev = $input.first().json;
+const calendar = [];
+try {
+  const raw = await this.helpers.httpRequest({
+    url: 'https://nfs.faireconomy.media/ff_calendar_thisweek.json',
+    headers: { 'User-Agent': 'Mozilla/5.0' }, json: true, timeout: 15000,
+  });
+  const tz = 'Europe/Madrid';
+  const day = d => d.toLocaleDateString('sv-SE', { timeZone: tz });
+  const hm = d => d.toLocaleTimeString('es-ES', { timeZone: tz, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const now = new Date();
+  const today = day(now), tomorrow = day(new Date(now.getTime() + 864e5));
+  const lvl = { High: 'alto', Medium: 'medio', Low: 'bajo' };
+  const all = raw
+    .filter(x => ['USD', 'EUR'].includes(x.country) && lvl[x.impact])
+    .map(x => { const d = new Date(x.date); return { ts: d.getTime(), day: day(d), time: hm(d), cur: x.country,
+      impact: lvl[x.impact], title: x.title, forecast: x.forecast || '', previous: x.previous || '' }; });
+  // hoy: todo USD (cualquier impacto) y EUR medio/alto; mañana: solo impacto alto
+  const ev = all.filter(e => e.day === today ? (e.cur === 'USD' || e.impact !== 'bajo') : (e.day === tomorrow && e.impact === 'alto'));
+  const rank = e => ({ alto: 0, medio: 1, bajo: 2 })[e.impact];
+  const todayEv = ev.filter(e => e.day === today).sort((a, b) => rank(a) - rank(b) || a.ts - b.ts).slice(0, 16);
+  const tomEv = ev.filter(e => e.day === tomorrow).sort((a, b) => a.ts - b.ts).slice(0, 3);
+  [...todayEv, ...tomEv].sort((a, b) => a.ts - b.ts).forEach((e, i) => calendar.push({
+    id: i + 1, when: e.day === today ? 'hoy' : 'mañana', published: e.ts < now.getTime(),
+    time: e.time, cur: e.cur, impact: e.impact, title: e.title, forecast: e.forecast, previous: e.previous }));
+} catch (e) { /* sin calendario: el informe sale igual */ }
+return [{ json: { ...prev, calendar } }];
+"""
+
 JS_SYNTH_REQ = r"""
 const { session, heads, articleUrl, weekTitle, pub, excerpt } = $('Prepare LLM inputs').first().json;
 let cls = {};
@@ -132,7 +162,7 @@ let sel = heads.map(h => ({ ...h, c: tag.get(h.i) }));
 const tagged = sel.some(h => h.c);
 if (tagged) sel = sel.filter(h => h.c && h.c.r === 1);
 sel.sort((a, b) => ((b.c && b.c.w) || 0) - ((a.c && a.c.w) || 0) || b.ts - a.ts);
-sel = sel.filter(h => !h.c || h.c.w >= 2).slice(0, 22);
+sel = sel.filter(h => !h.c || h.c.w >= 2).slice(0, 18);
 const hhmm = ts => new Date(ts).toISOString().slice(11, 16);
 const lines = sel.map(h => (h.c ? '[' + h.c.a + '|' + h.c.u + '|w' + h.c.w + '] ' : '') + h.title + ' (' + hhmm(h.ts) + ' UTC)').join('\n');
 
@@ -142,6 +172,9 @@ const mline = m => m.name + ': ' + m.last.toFixed(m.name === 'EURUSD' ? 4 : 2) +
   (m.name === 'US10Y' ? m.d5bps.toFixed(0) + 'pb' : m.d5.toFixed(2) + '%') + ' | RSI14 diario ' +
   (m.rsi == null ? 'n/d' : m.rsi.toFixed(0)) + ' | ' + m.vsSma + ' SMA20';
 const mtxt = market.map(mline).join('\n');
+const cal = $('Economic calendar').first().json.calendar || [];
+const ctxt = cal.map(e => e.id + '| ' + e.when + ' ' + e.time + ' (hora España) ' + e.cur + ' [' + e.impact + '] ' + e.title +
+  ' | prevista ' + (e.forecast || 'n/d') + ' | anterior ' + (e.previous || 'n/d') + (e.published ? ' | YA PUBLICADO' : '')).join('\n');
 const sd = $getWorkflowStaticData('global');
 const today = $now.setZone('Europe/Madrid').toFormat('yyyy-MM-dd');
 const prev = session === 'ny' && sd.london && sd.london.date === today ? sd.london.report : null;
@@ -154,18 +187,24 @@ const sys = 'Eres analista macro para un trader retail de EURUSD y XAUUSD (opera
   '4) Pondera sobre todo: señales de Fed/BCE (tipos, discursos), yields de EE.UU., petróleo/Irán-Ormuz, DXY y oro tal como los describe el briefing. Un movimiento pequeño del DXY no basta para un sesgo. ' +
   '5) "eventos": rellénalo siempre que el briefing liste datos u oradores; SOLO los de la línea "Looking ahead"/"Speakers" del briefing y de la semana; NO inventes horas ni uses la hora de publicación de un titular como hora del evento; si no consta hora, no la pongas. ' +
   '6) Responde en español, conciso. ' +
+  '8) "calendario": una entrada {"id","sube","escenarios","publicado"} por cada evento del CALENDARIO, con su mismo id. ' +
+  '"sube" = efecto sobre el USD si el dato supera la previsión: "+" (USD sube), "-" (USD baja) o "0" (sin dirección, p. ej. oradores sin cifra). Pautas: inflación (IPC, PCE, deflactor y índices de precios del PIB), empleo, PIB, gasto/ingresos y PMI de EE.UU. superiores a la previsión suelen fortalecer al USD (sube "+"; los precios altos elevan las expectativas de tipos de la Fed); paro, peticiones de subsidio, déficit comercial mayor o inventarios de crudo mayores suelen debilitarlo ("-"); datos de la eurozona fuertes debilitan al USD ("-") y flojos lo fortalecen. ' +
+  '"escenarios" = 1-2 frases con el efecto si supera y si decepciona, teniendo en cuenta el contexto del briefing (expectativas de Fed/BCE), SOLO para eventos de impacto alto o medio; vacío para los de impacto bajo. No pronostiques la cifra. ' +
+  '"publicado" (solo eventos YA PUBLICADOS) = resultado frente a previsión y su efecto en el USD SOLO si consta en los titulares o el briefing; si no consta, "no consta en los titulares". Vacío en pendientes. ' +
+  'Los de impacto bajo salen junto a otros: trátalos como parte del mismo bloque de datos. Si hay eventos de impacto alto en USD, menciónalos en riesgos (volatilidad a esa hora). ' +
   '7) Si hay DATOS DE MERCADO, úsalos como hechos: relaciona DXY, yields y VIX con el sesgo. Menciona el RSI solo si está en sobrecompra (>70), sobreventa (<30) o contradice claramente el sesgo; un RSI extremo en la dirección del sesgo es riesgo de agotamiento o rebote (ponlo en riesgos), no confirmación. No inventes otros niveles. ' +
   'Devuelve SOLO JSON con esta forma: {"sesgo_usd":"alcista|bajista|neutral|mixto","confianza":"baja|media|alta",' +
   '"resumen":"2-3 frases","drivers":["3-5 puntos"],"eventos":["evento con hora UTC si consta"],' +
-  '"eurusd":"1-2 frases","xauusd":"1-2 frases","riesgos":["1-3 puntos"],"cambios":"solo si hay informe previo: qué cambió desde Londres; si no, cadena vacía"}.';
+  '"eurusd":"1-2 frases","xauusd":"1-2 frases","riesgos":["1-3 puntos"],"calendario":[{"id":1,"sube":"+","escenarios":"","publicado":""}],"cambios":"solo si hay informe previo: qué cambió desde Londres; si no, cadena vacía"}.';
 const user = 'SESIÓN: ' + (session === 'ny' ? 'pre-Nueva York' : 'apertura Londres') + '\n' +
   'BRIEFING NEWSQUAWK (publicado ' + pub + '):\n' + excerpt + '\n\n' +
+  'CALENDARIO ECONÓMICO (Forex Factory, hora de España):\n' + (ctxt || 'no disponible') + '\n\n' +
   'DATOS DE MERCADO (Yahoo Finance, diario, última vela en curso):\n' + (mtxt || 'no disponibles') + '\n\n' +
   'SEMANA: ' + weekTitle + '\n\n' +
   'TITULARES FILTRADOS (formato [activo|efecto USD|impacto]):\n' + lines +
   (prev ? '\n\nINFORME PREVIO DE LONDRES (para comparar):\n' + JSON.stringify(prev) : '');
 const body2 = {
-  model: '__MODEL_SYNTH__', temperature: 0.2, max_completion_tokens: 2500, reasoning_effort: 'medium',
+  model: '__MODEL_SYNTH__', temperature: 0.2, max_completion_tokens: 3200, reasoning_effort: 'medium',
   response_format: { type: 'json_object' },
   messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
 };
@@ -191,6 +230,20 @@ const mHtml = !market.length ? '<p style="color:#b45309">Datos de mercado no dis
   market.map(m => '<tr><td style="padding:2px 12px 2px 0"><b>' + esc(m.name) + '</b></td><td style="padding:2px 12px 2px 0">' + esc(fv(m)) + '</td><td style="padding:2px 12px 2px 0">' +
     (m.name === 'US10Y' ? (m.d5bps >= 0 ? '+' : '') + m.d5bps.toFixed(0) + 'pb' : (m.d5 >= 0 ? '+' : '') + m.d5.toFixed(2) + '%') +
     '</td><td style="padding:2px 12px 2px 0">' + rs(m) + '</td><td>' + m.vsSma + '</td></tr>').join('') + '</table>' : '';
+const calendar = $('Economic calendar').first().json.calendar || [];
+const cmap = new Map((Array.isArray(r.calendario) ? r.calendario : []).map(x => [Number(x.id), x]));
+const rows = calendar.map(e => { const c = cmap.get(e.id) || {}; return { ...e, esc: c.escenarios || '', pub: c.publicado || '', sube: c.sube || '' }; });
+const eff = e => e.pub ? '✓ ' + e.pub : e.esc ? '→ ' + e.esc
+  : e.sube === '+' ? '→ si supera la previsión: USD ▲' : e.sube === '-' ? '→ si supera la previsión: USD ▼' : '';
+const cut = t => t.length <= 3900 ? t : t.slice(0, t.lastIndexOf('\n', 3900));
+const calTg = rows.length ? '<b>Calendario (hora España)</b>\n' + rows.map(e => e.time + ' ' + e.cur + ' ' + esc(e.title) + ' [' + e.impact + ']' +
+    (e.when === 'mañana' ? ' (mañana)' : '') + (e.forecast ? ' · prevista ' + esc(e.forecast) : '') + (e.previous ? ' · anterior ' + esc(e.previous) : '') +
+    (eff(e) ? '\n   ' + esc(eff(e)) : '')).join('\n') + '\n\n'
+  : '<i>Calendario no disponible esta vez</i>\n\n';
+const calHtml = rows.length ? '<h3>Calendario económico (hora España)</h3><table style="border-collapse:collapse;font-size:14px"><tr style="color:#666;text-align:left"><th style="padding:3px 10px 3px 0">Hora</th><th style="padding:3px 10px 3px 0">Evento</th><th style="padding:3px 10px 3px 0">Impacto</th><th style="padding:3px 10px 3px 0">Prevista</th><th style="padding:3px 10px 3px 0">Anterior</th><th>Efecto en el USD</th></tr>' +
+  rows.map(e => '<tr style="vertical-align:top;border-top:1px solid #eee"><td style="padding:3px 10px 3px 0;white-space:nowrap">' + (e.when === 'mañana' ? 'mañana ' : '') + e.time + '</td><td style="padding:3px 10px 3px 0"><b>' + esc(e.cur) + '</b> ' + esc(e.title) +
+    '</td><td style="padding:3px 10px 3px 0">' + e.impact + '</td><td style="padding:3px 10px 3px 0">' + esc(e.forecast) + '</td><td style="padding:3px 10px 3px 0">' + esc(e.previous) + '</td><td>' + esc(eff(e)) + '</td></tr>').join('') + '</table>'
+  : '<p style="color:#b45309">Calendario no disponible esta vez.</p>';
 const bullets = a => arr(a).map(x => '• ' + esc(x)).join('\n');
 
 const tg = '<b>Macro Brief — ' + label + ' · ' + date + '</b>\n' +
@@ -198,7 +251,7 @@ const tg = '<b>Macro Brief — ' + label + ' · ' + date + '</b>\n' +
   esc(r.resumen) + '\n\n' +
   (r.cambios ? '<b>Cambios desde Londres</b>\n' + esc(r.cambios) + '\n\n' : '') +
   mTg + '<b>EURUSD</b> ' + esc(r.eurusd) + '\n<b>XAUUSD</b> ' + esc(r.xauusd) + '\n\n' +
-  (arr(r.eventos).length ? '<b>Eventos</b>\n' + bullets(r.eventos) + '\n\n' : '') +
+  (!rows.length && arr(r.eventos).length ? '<b>Eventos</b>\n' + bullets(r.eventos) + '\n\n' : '') +
   (arr(r.riesgos).length ? '<b>Riesgos</b>\n' + bullets(r.riesgos) : '');
 
 const li = a => arr(a).map(x => '<li>' + esc(x) + '</li>').join('');
@@ -208,19 +261,19 @@ const html = '<div style="font-family:-apple-system,Segoe UI,Helvetica,Arial,san
   '<p style="font-size:18px;margin:0 0 12px">' + mark + ' Sesgo USD: <b>' + esc(r.sesgo_usd) + '</b> · confianza ' + esc(r.confianza) + '</p>' +
   '<p>' + esc(r.resumen) + '</p>' +
   (r.cambios ? '<h3>Cambios desde Londres</h3><p>' + esc(r.cambios) + '</p>' : '') +
-  mHtml + '<h3>Drivers</h3><ul>' + li(r.drivers) + '</ul>' +
+  mHtml + calHtml + '<h3>Drivers</h3><ul>' + li(r.drivers) + '</ul>' +
   '<h3>EURUSD</h3><p>' + esc(r.eurusd) + '</p>' +
   '<h3>XAUUSD</h3><p>' + esc(r.xauusd) + '</p>' +
-  (arr(r.eventos).length ? '<h3>Eventos</h3><ul>' + li(r.eventos) + '</ul>' : '') +
+  (!rows.length && arr(r.eventos).length ? '<h3>Eventos</h3><ul>' + li(r.eventos) + '</ul>' : '') +
   (arr(r.riesgos).length ? '<h3>Riesgos</h3><ul>' + li(r.riesgos) + '</ul>' : '') +
-  '<p style="color:#888;font-size:12px;margin-top:24px">Sesgo orientativo generado por IA a partir de titulares públicos. No es una señal de entrada. Fuente: <a href="' + esc(articleUrl) + '">Newsquawk</a>.</p></div>';
+  '<p style="color:#888;font-size:12px;margin-top:24px">Sesgo orientativo generado por IA a partir de titulares públicos. No es una señal de entrada. Calendario: Forex Factory (previsiones pueden diferir de otras plataformas). Fuente: <a href="' + esc(articleUrl) + '">Newsquawk</a>.</p></div>';
 
 if (session === 'london') {
   const sd = $getWorkflowStaticData('global');
   sd.london = { date: $now.setZone('Europe/Madrid').toFormat('yyyy-MM-dd'), report: r };
 }
 const subject = 'Macro Brief ' + label + ' · USD ' + r.sesgo_usd + ' · ' + date;
-return [{ json: { subject, html, tg } }];
+return [{ json: { subject, html, tg: cut(tg), tgCal: cut(calTg.trim()) } }];
 """
 
 
@@ -277,6 +330,7 @@ def build(chat_id, test_path=None, error_wf=None, fail=False):
         {**http_get("n6", "Fetch briefing", "={{ $json.articleUrl }}", [1100, 0])},
         code_node("n7", "Prepare LLM inputs", JS_PREPARE, [1320, 0]),
         code_node("n7b", "Market data", JS_MARKET, [1430, -160]),
+        code_node("n7c", "Economic calendar", JS_CALENDAR, [1430, 160]),
         groq_node("n8", "Groq classify", "={{ JSON.stringify($json.body1) }}", [1540, 0]),
         {"id": "n9", "name": "Wait 60s", "type": "n8n-nodes-base.wait", "typeVersion": 1.1,
          "position": [1760, 0], "parameters": {"resume": "timeInterval", "amount": 60, "unit": "seconds"}},
@@ -288,6 +342,11 @@ def build(chat_id, test_path=None, error_wf=None, fail=False):
          "parameters": {"resource": "message", "operation": "send", "sendTo": EMAIL_TO,
                         "subject": "={{ $json.subject }}", "emailType": "html", "message": "={{ $json.html }}",
                         "options": {"appendAttribution": False}}},
+        {"id": "n15", "name": "Send Telegram calendar", "type": "n8n-nodes-base.telegram", "typeVersion": 1.2,
+         "position": [2900, 100], "credentials": {"telegramApi": CRED_TELEGRAM},
+         "parameters": {"resource": "message", "operation": "sendMessage", "chatId": chat_id,
+                        "text": "={{ $('Format report').first().json.tgCal }}",
+                        "additionalFields": {"parse_mode": "HTML", "appendAttribution": False}}},
         {"id": "n14", "name": "Send Telegram", "type": "n8n-nodes-base.telegram", "typeVersion": 1.2,
          "position": [2660, 100], "credentials": {"telegramApi": CRED_TELEGRAM},
          "parameters": {"resource": "message", "operation": "sendMessage", "chatId": chat_id,
@@ -295,12 +354,13 @@ def build(chat_id, test_path=None, error_wf=None, fail=False):
                         "additionalFields": {"parse_mode": "HTML", "appendAttribution": False}}},
     ]
     chain = ["Session", "RSS", "Daily list", "Pick sources", "Fetch briefing", "Prepare LLM inputs",
-             "Market data", "Groq classify", "Wait 60s", "Build synthesis request", "Groq synthesize", "Format report"]
+             "Market data", "Economic calendar", "Groq classify", "Wait 60s", "Build synthesis request", "Groq synthesize", "Format report"]
     conns = {"Schedule": {"main": [[{"node": "Session", "type": "main", "index": 0}]]}}
     for a, b in zip(chain, chain[1:]):
         conns[a] = {"main": [[{"node": b, "type": "main", "index": 0}]]}
     conns["Format report"] = {"main": [[{"node": "Send email", "type": "main", "index": 0},
                                         {"node": "Send Telegram", "type": "main", "index": 0}]]}
+    conns["Send Telegram"] = {"main": [[{"node": "Send Telegram calendar", "type": "main", "index": 0}]]}
     if test_path:
         nodes.append({"id": "n0", "name": "Test webhook", "type": "n8n-nodes-base.webhook", "typeVersion": 2,
                       "position": [0, 200], "webhookId": secrets.token_hex(8),
