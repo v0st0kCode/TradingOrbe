@@ -80,11 +80,13 @@ const sys = 'Eres un filtro de noticias de mercado para un trader de EURUSD y XA
   'r=0 para ruido: datos menores de economías pequeñas o emergentes (Turquía, Sudáfrica, Polonia, Suecia, etc.), movers de acciones sueltas, M&A, corporativo, deportes. ' +
   'w=3 SOLO para: decisiones o discursos de Fed/BCE con señal de tipos, datos clave de EE.UU. o eurozona (NFP, CPI, PCE, PMI, GDP), escalada o desescalada real en Irán/Ormuz, shocks de petróleo o yields. ' +
   'w=2 para datos relevantes de Alemania/Francia/Reino Unido/China y geopolítica secundaria. w=1 el resto. La mayoría de titulares debe ser w1 o r=0; no marques todo como w2. ' +
+  'SIEMPRE r=1 y w>=2 para: comentarios de Fed/BCE/BoE/BoJ sobre tipos, inflación o previsiones; titulares [MARKET UPDATE] o [MARKET ANALYSIS] sobre DXY, yields, bonos, petróleo o aversión al riesgo; declaraciones de Trump o de Irán sobre Irán/Ormuz, tipos de interés o aranceles; shocks de oferta de petróleo o diésel; ' +
+  'inflación preliminar de países de la eurozona (HICP/CPI) el día del dato flash de la eurozona. ' +
   'u = efecto probable sobre el USD, NO sobre el activo del titular: Fed halcón, yields al alza, aversión al riesgo, datos débiles de eurozona/UK => bull (USD sube); Fed dovish, yields a la baja, apetito de riesgo, datos fuertes de eurozona => bear (USD baja); si no está claro => neutral. ' +
   'a = activo más afectado. No expliques nada fuera del JSON.';
 const user = heads.map(h => h.i + '|' + h.title).join('\n');
 const body1 = {
-  model: '__MODEL_CLASSIFY__', temperature: 0.1, max_completion_tokens: 3500, reasoning_effort: 'low',
+  model: '__MODEL_CLASSIFY__', temperature: 0, max_completion_tokens: 3500, reasoning_effort: 'low',
   response_format: { type: 'json_object' },
   messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
 };
@@ -106,14 +108,26 @@ const rsi = (c, n = 14) => {
   }
   return l === 0 ? 100 : 100 - 100 / (1 + g / l);
 };
+// La serie diaria de Yahoo para FX trae el cierre de la última sesión desfasado (= apertura) y una vela en curso con close null.
+// Se reconstruyen cierres por sesión desde velas horarias (rollover ~22 UTC; con +2h no salen sesiones fantasma en fin de semana); el último valor es el precio actual.
+const sessions = (ts, cl) => {
+  const out = []; let key = null;
+  for (let i = 0; i < ts.length; i++) {
+    if (cl[i] == null) continue;
+    const k = new Date(ts[i] * 1000 + 2 * 3600e3).toISOString().slice(0, 10);
+    if (k !== key) { out.push(cl[i]); key = k; } else out[out.length - 1] = cl[i];
+  }
+  return out;
+};
 const market = [];
 for (const [name, sym] of syms) {
   try {
     const r = await this.helpers.httpRequest({
-      url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(sym) + '?range=6mo&interval=1d',
+      url: 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(sym) + '?range=3mo&interval=1h',
       headers: { 'User-Agent': 'Mozilla/5.0' }, json: true, timeout: 15000,
     });
-    const c = r.chart.result[0].indicators.quote[0].close.filter(x => x != null);
+    const res = r.chart.result[0];
+    const c = sessions(res.timestamp, res.indicators.quote[0].close);
     const last = c[c.length - 1], p1 = c[c.length - 2], p5 = c[c.length - 6];
     const sma20 = c.slice(-20).reduce((a, b) => a + b, 0) / 20;
     market.push({ name, last, d1: (last / p1 - 1) * 100, d5: (last / p5 - 1) * 100,
@@ -179,7 +193,14 @@ let sel = heads.map(h => ({ ...h, c: tag.get(h.i) }));
 const tagged = sel.some(h => h.c);
 if (tagged) sel = sel.filter(h => h.c && h.c.r === 1);
 sel.sort((a, b) => ((b.c && b.c.w) || 0) - ((a.c && a.c.w) || 0) || b.ts - a.ts);
-sel = sel.filter(h => !h.c || h.c.w >= 2).slice(0, 18);
+sel = sel.filter(h => !h.c || h.c.w >= 2);
+// red de seguridad: el clasificador es inestable; si deja pocos titulares, se completa con palabras clave de mercado
+if (sel.length < 6) {
+  const KEY = /\b(Fed|FOMC|ECB|BoE|BoJ|DXY|yields?|T-note|Treasur|crude|oil|Brent|diesel|Hormuz|Iran|NFP|CPI|HICP|PCE|PMI|gold|inflation|interest rate|tariff)|MARKET (UPDATE|ANALYSIS)/i;
+  const have = new Set(sel.map(h => h.i));
+  sel = sel.concat(heads.filter(h => !have.has(h.i) && KEY.test(h.title)).slice(0, 12 - sel.length));
+}
+sel = sel.slice(0, 18);
 const hhmm = ts => new Date(ts).toISOString().slice(11, 16);
 const lines = sel.map(h => (h.c ? '[' + h.c.a + '|' + h.c.u + '|w' + h.c.w + '] ' : '') + h.title + ' (' + hhmm(h.ts) + ' UTC)').join('\n');
 
@@ -259,7 +280,7 @@ const dirOf = e => {
   const usdUp = neg ? '-' : '+';
   return e.cur === 'USD' ? usdUp : (usdUp === '+' ? '-' : '+');
 };
-const rows = calendar.map(e => { const c = cmap.get(e.id) || {}; return { ...e, nota: c.nota || '', pub: c.publicado || '', sube: (c.sube === '+' || c.sube === '-') ? c.sube : dirOf(e) }; });
+const rows = calendar.map(e => { const c = cmap.get(e.id) || {}; return { ...e, nota: c.nota || '', pub: c.publicado || '', sube: dirOf(e) }; }); // dirección determinista: el LLM la invertía a veces (p. ej. IPC de la eurozona)
 const eff = e => e.pub ? '✓ ' + e.pub
   : (e.sube === '+' ? 'si supera: USD ▲' : e.sube === '-' ? 'si supera: USD ▼' : '') + (e.nota ? (e.sube === '+' || e.sube === '-' ? ' · ' : '') + e.nota : '');
 const cut = t => t.length <= 3900 ? t : t.slice(0, t.lastIndexOf('\n', 3900));
