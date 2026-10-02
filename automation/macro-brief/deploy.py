@@ -120,7 +120,24 @@ for (const [name, sym] of syms) {
       d1bps: (last - p1) * 100, d5bps: (last - p5) * 100, rsi: rsi(c), vsSma: last >= sma20 ? 'sobre' : 'bajo' });
   } catch (e) { /* sin dato: se omite ese instrumento */ }
 }
-return [{ json: { ...prev, market } }];
+// GC=F son futuros COMEX (~+30$ sobre spot): para el nivel de XAUUSD se usa spot; GC=F solo aporta d1/d5/RSI/SMA20
+const gold = market.find(m => m.name === 'XAUUSD');
+if (gold) {
+  let px = null;
+  try {
+    const q = await this.helpers.httpRequest({ url: 'https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD', json: true, timeout: 10000 });
+    const p = q[0].spreadProfilePrices.find(x => x.spreadProfile === 'prime') || q[0].spreadProfilePrices[0];
+    px = (p.bid + p.ask) / 2;
+  } catch (e) { /* respaldo abajo */ }
+  if (!px) {
+    try {
+      const g = await this.helpers.httpRequest({ url: 'https://api.gold-api.com/price/XAU', json: true, timeout: 10000 });
+      if (g && g.price > 0) px = g.price;
+    } catch (e) { /* sin spot */ }
+  }
+  if (px) gold.last = px; else gold.fut = true;
+}
+return [{ json: { ...prev, market, marketAt: Date.now() } }];
 """
 
 JS_CALENDAR = r"""
@@ -167,7 +184,7 @@ const hhmm = ts => new Date(ts).toISOString().slice(11, 16);
 const lines = sel.map(h => (h.c ? '[' + h.c.a + '|' + h.c.u + '|w' + h.c.w + '] ' : '') + h.title + ' (' + hhmm(h.ts) + ' UTC)').join('\n');
 
 const market = $('Market data').first().json.market || [];
-const mline = m => m.name + ': ' + m.last.toFixed(m.name === 'EURUSD' ? 4 : 2) + ' | 1d ' +
+const mline = m => m.name + (m.fut ? ' (futuros COMEX, ~+30$ sobre spot)' : '') + ': ' + m.last.toFixed(m.name === 'EURUSD' ? 4 : 2) + ' | 1d ' +
   (m.name === 'US10Y' ? m.d1bps.toFixed(0) + 'pb' : m.d1.toFixed(2) + '%') + ' | 5d ' +
   (m.name === 'US10Y' ? m.d5bps.toFixed(0) + 'pb' : m.d5.toFixed(2) + '%') + ' | RSI14 diario ' +
   (m.rsi == null ? 'n/d' : m.rsi.toFixed(0)) + ' | ' + m.vsSma + ' SMA20';
@@ -187,6 +204,7 @@ const sys = 'Eres analista macro para un trader retail de EURUSD y XAUUSD (opera
   '4) Pondera sobre todo: señales de Fed/BCE (tipos, discursos), yields de EE.UU., petróleo/Irán-Ormuz, DXY y oro tal como los describe el briefing. Un movimiento pequeño del DXY no basta para un sesgo. ' +
   '5) "eventos": rellénalo siempre que el briefing liste datos u oradores; SOLO los de la línea "Looking ahead"/"Speakers" del briefing y de la semana; NO inventes horas ni uses la hora de publicación de un titular como hora del evento; si no consta hora, no la pongas. ' +
   '6) Responde en español, conciso. ' +
+  '7) No cites precios ni cotizaciones numéricas en ningún campo (las cifras de mercado se muestran aparte); describe solo dirección, sesgo y contexto. ' +
   '8) "calendario": una entrada {"id","sube","nota","publicado"} por cada evento del CALENDARIO, con su mismo id. "sube" = efecto sobre el USD si el dato supera la previsión: "+" (USD sube) o "-" (USD baja); "0" SOLO si el evento no tiene previsión (p. ej. un orador). Nunca pongas "0" en un evento con previsión. ' +
   'Pautas: inflación (IPC, PCE, deflactor y índices de precios), empleo, PIB, gasto y PMI de EE.UU. superiores a la previsión suelen fortalecer al USD ("+"; los precios altos elevan las expectativas de tipos de la Fed); paro, peticiones de subsidio o déficit comercial mayor suelen debilitarlo ("-"); datos de la eurozona fuertes debilitan al USD ("-") y flojos lo fortalecen. ' +
   '"nota" = máximo 10 palabras SOLO si aportan contexto concreto del briefing (p. ej. qué descuenta el mercado de la Fed/BCE); prohibido describir qué es el dato; si no hay contexto, cadena vacía. "publicado" (solo eventos YA PUBLICADOS) = resultado frente a previsión y efecto en el USD en máximo 12 palabras, SOLO si consta en los titulares o el briefing; si no consta, "sin dato en titulares". Vacío en pendientes. No pronostiques la cifra. ' +
@@ -198,7 +216,7 @@ const sys = 'Eres analista macro para un trader retail de EURUSD y XAUUSD (opera
 const user = 'SESIÓN: ' + (session === 'ny' ? 'pre-Nueva York' : 'apertura Londres') + '\n' +
   'BRIEFING NEWSQUAWK (publicado ' + pub + '):\n' + excerpt + '\n\n' +
   'CALENDARIO ECONÓMICO (Forex Factory, hora de España):\n' + (ctxt || 'no disponible') + '\n\n' +
-  'DATOS DE MERCADO (Yahoo Finance, diario, última vela en curso):\n' + (mtxt || 'no disponibles') + '\n\n' +
+  'DATOS DE MERCADO (Yahoo Finance diario, vela en curso; el nivel de XAUUSD es spot, sus % y RSI salen de futuros):\n' + (mtxt || 'no disponibles') + '\n\n' +
   'SEMANA: ' + weekTitle + '\n\n' +
   'TITULARES FILTRADOS (formato [activo|efecto USD|impacto]):\n' + lines +
   (prev ? '\n\nINFORME PREVIO DE LONDRES (para comparar):\n' + JSON.stringify(prev) : '');
@@ -224,10 +242,13 @@ const market = $('Market data').first().json.market || [];
 const fv = m => m.name === 'US10Y' ? m.last.toFixed(2) + '% (' + (m.d1bps >= 0 ? '+' : '') + m.d1bps.toFixed(0) + 'pb)'
   : m.last.toFixed(m.name === 'EURUSD' ? 4 : m.name === 'XAUUSD' ? 0 : 2) + ' (' + (m.d1 >= 0 ? '+' : '') + m.d1.toFixed(2) + '%)';
 const rs = m => m.rsi == null ? 'n/d' : Math.round(m.rsi);
-const short = m => esc(m.name) + ' ' + esc(fv(m)) + ' RSI ' + rs(m);
-const mTg = !market.length ? '<i>Mercado no disponible</i>\n\n' : '<b>Mercado</b>\n' + market.slice(0, 3).map(short).join(' · ') + '\n' + market.slice(3).map(short).join(' · ') + '\n\n';
-const mHtml = !market.length ? '<p style="color:#b45309">Datos de mercado no disponibles esta vez (Yahoo).</p>' : market.length ? '<h3>Mercado</h3><table style="border-collapse:collapse;font-size:14px"><tr style="color:#666;text-align:left"><th style="padding:2px 12px 2px 0">Activo</th><th style="padding:2px 12px 2px 0">Último (1d)</th><th style="padding:2px 12px 2px 0">5d</th><th style="padding:2px 12px 2px 0">RSI14</th><th>vs SMA20</th></tr>' +
-  market.map(m => '<tr><td style="padding:2px 12px 2px 0"><b>' + esc(m.name) + '</b></td><td style="padding:2px 12px 2px 0">' + esc(fv(m)) + '</td><td style="padding:2px 12px 2px 0">' +
+const nm = m => m.name + (m.fut ? ' (fut)' : '');
+const mAt = $('Market data').first().json.marketAt;
+const asof = mAt ? ' · datos ' + new Date(mAt).toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) + ' (España)' : '';
+const short = m => esc(nm(m)) + ' ' + esc(fv(m)) + ' RSI ' + rs(m);
+const mTg = !market.length ? '<i>Mercado no disponible</i>\n\n' : '<b>Mercado</b>' + esc(asof) + '\n' + market.slice(0, 3).map(short).join(' · ') + '\n' + market.slice(3).map(short).join(' · ') + '\n\n';
+const mHtml = !market.length ? '<p style="color:#b45309">Datos de mercado no disponibles esta vez (Yahoo).</p>' : market.length ? '<h3>Mercado<span style="font-weight:normal;font-size:12px;color:#666">' + esc(asof) + '</span></h3><table style="border-collapse:collapse;font-size:14px"><tr style="color:#666;text-align:left"><th style="padding:2px 12px 2px 0">Activo</th><th style="padding:2px 12px 2px 0">Último (1d)</th><th style="padding:2px 12px 2px 0">5d</th><th style="padding:2px 12px 2px 0">RSI14</th><th>vs SMA20</th></tr>' +
+  market.map(m => '<tr><td style="padding:2px 12px 2px 0"><b>' + esc(nm(m)) + '</b></td><td style="padding:2px 12px 2px 0">' + esc(fv(m)) + '</td><td style="padding:2px 12px 2px 0">' +
     (m.name === 'US10Y' ? (m.d5bps >= 0 ? '+' : '') + m.d5bps.toFixed(0) + 'pb' : (m.d5 >= 0 ? '+' : '') + m.d5.toFixed(2) + '%') +
     '</td><td style="padding:2px 12px 2px 0">' + rs(m) + '</td><td>' + m.vsSma + '</td></tr>').join('') + '</table>' : '';
 const calendar = $('Economic calendar').first().json.calendar || [];
